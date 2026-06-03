@@ -42,7 +42,7 @@ pnpm tauri:build          # 完整桌面打包
 
 ### 关键业务逻辑
 
-- 余额查询：`GET <endpoint_url>` 带 `Authorization: Bearer <token>` 和 `New-Api-User: <userId>` 请求头
+- 余额查询：`GET <endpoint_url>/api/user/self` 带 `Authorization: Bearer <token>` 和 `New-Api-User: <userId>` 请求头
 - 余额计算：`quota / 500_000`（常量 `QUOTA_SCALE`）
 - 配置文件：存储在 Tauri app config 目录的 `config.json`（含 `endpoint_url`、`access_token`、`user_id`）
 - 端点校验：必须是 HTTPS 或 localhost

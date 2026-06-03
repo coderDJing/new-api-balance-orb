@@ -132,8 +132,13 @@ async fn query_balance(app: AppHandle) -> Result<BalanceSnapshot, String> {
         .build()
         .map_err(|err| format!("创建 HTTP 客户端失败: {err}"))?;
 
+    let url = format!(
+        "{}/api/user/self",
+        config.endpoint_url.trim_end_matches('/')
+    );
+
     let response = client
-        .get(&config.endpoint_url)
+        .get(&url)
         .header("Authorization", format!("Bearer {}", config.access_token))
         .header("New-Api-User", config.user_id)
         .send()
@@ -380,7 +385,6 @@ fn show_main_window(app: &AppHandle) {
 
 fn show_settings(app: &AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window("settings") {
-        let _ = window.center();
         window.show()?;
         window.set_focus()?;
     }
@@ -390,21 +394,36 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
 
 fn position_main_window(app: &App) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window("main") {
-        // 窗口尺寸
-        let window_width = 348.0;
+        // 窗口逻辑尺寸
+        let window_width: f64 = 348.0;
         // 距屏幕边缘的边距
-        let margin = 20.0;
+        let margin: f64 = 20.0;
 
-        // 尝试获取主显示器尺寸，使用默认值作为兜底
-        let screen_width = match app.primary_monitor() {
-            Ok(Some(monitor)) => monitor.size().width as f64,
-            _ => 1920.0,
-        };
+        // 获取主显示器信息
+        match app.primary_monitor() {
+            Ok(Some(monitor)) => {
+                let size = monitor.size();
+                let scale = monitor.scale_factor();
+                let logical_width = size.width as f64 / scale;
+                let logical_height = size.height as f64 / scale;
+                eprintln!("[position] physical: {}x{}, scale: {scale}, logical: {logical_width}x{logical_height}", size.width, size.height);
 
-        let x = screen_width - window_width - margin;
-        let y = margin;
+                let x = logical_width - window_width - margin;
+                let y = margin;
 
-        window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)))?;
+                eprintln!("[position] placing at logical ({x}, {y})");
+                window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)))?;
+            }
+            _ => {
+                eprintln!("[position] could not get monitor, using fallback");
+                let x = 1920.0 - window_width - margin;
+                window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
+                    x, margin,
+                )))?;
+            }
+        }
+    } else {
+        eprintln!("[position] main window not found");
     }
 
     Ok(())

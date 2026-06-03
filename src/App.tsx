@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Eye, EyeOff, Power, RefreshCw, Save, Settings, X } from "lucide-react";
+import { Power, RefreshCw, Save, Settings, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 
 const REFRESH_INTERVAL_MS = 60_000;
+const NON_DRAG_SELECTOR =
+  "button, input, textarea, select, label, a, [role='button'], [data-window-no-drag]";
 
 declare global {
   interface Window {
@@ -94,10 +96,18 @@ function App() {
   return windowKind === "settings" ? <SettingsWindow /> : <BalanceWindow />;
 }
 
+function startWindowDrag(event: React.MouseEvent<HTMLElement>) {
+  if (!isTauriRuntime() || event.button !== 0 || event.buttons !== 1) return;
+
+  const target = event.target;
+  if (!(target instanceof HTMLElement) || target.closest(NON_DRAG_SELECTOR)) {
+    return;
+  }
+
+  void getCurrentWindow().startDragging().catch(() => undefined);
+}
+
 function BalanceWindow() {
-  const [config, setConfig] = useState<ClientConfig>({
-    hasAccessToken: false,
-  });
   const [snapshot, setSnapshot] = useState<BalanceSnapshot | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
@@ -117,9 +127,10 @@ function BalanceWindow() {
       setSnapshot(nextSnapshot);
 
       if (!nextSnapshot.configured) {
-        setStatus("setup");
+        // 配置未完成，隐藏主窗口，显示设置
         if (!promptedSetupRef.current) {
           promptedSetupRef.current = true;
+          await hideWindow();
           await showSettings();
         }
         return;
@@ -139,10 +150,12 @@ function BalanceWindow() {
       const loaded = await runCommand<ClientConfig>("load_config");
       if (!mounted) return;
 
-      setConfig(loaded);
       if (!loaded.hasAccessToken || !loaded.endpointUrl || !loaded.userId) {
+        // 配置未完成，隐藏主窗口，只显示设置
         promptedSetupRef.current = true;
+        await hideWindow();
         await showSettings();
+        return;
       }
       if (mounted) await refresh();
     }
@@ -172,8 +185,7 @@ function BalanceWindow() {
     if (!isTauriRuntime()) return;
 
     let unlisten: (() => void) | undefined;
-    listen<ClientConfig>("config-saved", async (event) => {
-      setConfig(event.payload);
+    listen<ClientConfig>("config-saved", async () => {
       promptedSetupRef.current = false;
       await refresh();
     })
@@ -209,23 +221,15 @@ function BalanceWindow() {
       ? "刷新中"
       : status === "error"
         ? "异常"
-        : status === "setup"
-          ? "待配置"
-          : "在线";
+        : "在线";
 
-  const userLabel = snapshot?.username || config.userId || "未绑定";
-  const groupLabel = snapshot?.group || "default";
   const refreshLabel = status === "ok" ? `${secondsLeft}s` : "--";
-  const requestLabel =
-    typeof snapshot?.requestCount === "number"
-      ? snapshot.requestCount.toLocaleString("zh-CN")
-      : "--";
 
   return (
     <main className="shell main-shell">
-      <div className="orb-window" data-tauri-drag-region>
-        <header className="topbar" data-tauri-drag-region>
-          <div className="brand" data-tauri-drag-region>
+      <div className="orb-window">
+        <header className="topbar" data-window-drag-handle onMouseDown={startWindowDrag}>
+          <div className="brand">
             <span className="brand-mark" />
             <span>AI Balance</span>
           </div>
@@ -258,7 +262,7 @@ function BalanceWindow() {
           </div>
         </header>
 
-        <section className="balance-stage" data-tauri-drag-region>
+        <section className="balance-stage">
           <div
             className="progress-ring"
             style={{ "--progress": progress } as React.CSSProperties}
@@ -267,23 +271,16 @@ function BalanceWindow() {
               <Power size={18} />
             </div>
           </div>
-          <div className="balance-copy" data-tauri-drag-region>
+          <div className="balance-copy">
             <span className={`status-pill ${status}`}>{healthText}</span>
             <strong className={snapshot?.remaining && snapshot.remaining < 0 ? "negative" : ""}>
               {remainingText}
             </strong>
             <div className="meta-line">
-              <span>{userLabel}</span>
-              <span>{groupLabel}</span>
               <span>{refreshLabel}</span>
             </div>
           </div>
         </section>
-
-        <footer className="orb-footer" data-tauri-drag-region>
-          <span>REQ</span>
-          <strong>{requestLabel}</strong>
-        </footer>
 
         {error && <div className="error-line">{error}</div>}
       </div>
@@ -296,7 +293,6 @@ function SettingsWindow() {
   const [accessToken, setAccessToken] = useState("");
   const [endpointUrl, setEndpointUrl] = useState("");
   const [userId, setUserId] = useState("");
-  const [showToken, setShowToken] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState("");
 
@@ -340,22 +336,11 @@ function SettingsWindow() {
     }
   }
 
-  const statusText =
-    saveStatus === "saving"
-      ? "保存中"
-      : saveStatus === "saved"
-        ? "已保存"
-        : saveStatus === "error"
-          ? "保存失败"
-          : config.hasAccessToken
-            ? "已配置"
-            : "未配置";
-
   return (
     <main className="shell settings-shell">
       <section className="settings-window">
-        <header className="topbar settings-topbar" data-tauri-drag-region>
-          <div className="brand" data-tauri-drag-region>
+        <header className="topbar settings-topbar" data-window-drag-handle onMouseDown={startWindowDrag}>
+          <div className="brand">
             <span className="brand-mark" />
             <span>Settings</span>
           </div>
@@ -370,16 +355,13 @@ function SettingsWindow() {
         </header>
 
         <div className="settings-body">
-          <div className={`status-strip ${saveStatus}`}>
-            <span>{statusText}</span>
-          </div>
-
           <label className="settings-field" htmlFor="endpoint-url">
-            <span>API Endpoint</span>
+            <span>Base URL</span>
             <input
               id="endpoint-url"
+              data-window-no-drag
               value={endpointUrl}
-              placeholder="https://example.com/api/user/self"
+              placeholder="https://example.com"
               onChange={(event) => {
                 setEndpointUrl(event.currentTarget.value);
                 setSaveStatus("idle");
@@ -389,32 +371,23 @@ function SettingsWindow() {
 
           <label className="settings-field" htmlFor="access-token">
             <span>Access Token</span>
-            <div className="input-wrap">
-              <input
-                id="access-token"
-                type={showToken ? "text" : "password"}
-                value={accessToken}
-                placeholder={config.hasAccessToken ? "已保存，留空不改" : "Access Token"}
-                onChange={(event) => {
-                  setAccessToken(event.currentTarget.value);
-                  setSaveStatus("idle");
-                }}
-              />
-              <button
-                className="inline-icon"
-                type="button"
-                title={showToken ? "隐藏" : "显示"}
-                onClick={() => setShowToken((show) => !show)}
-              >
-                {showToken ? <EyeOff size={14} /> : <Eye size={14} />}
-              </button>
-            </div>
+            <input
+              id="access-token"
+              data-window-no-drag
+              value={accessToken}
+              placeholder={config.hasAccessToken ? "已保存，留空不改" : "Access Token"}
+              onChange={(event) => {
+                setAccessToken(event.currentTarget.value);
+                setSaveStatus("idle");
+              }}
+            />
           </label>
 
           <label className="settings-field" htmlFor="user-id">
             <span>User ID</span>
             <input
               id="user-id"
+              data-window-no-drag
               value={userId}
               placeholder="User ID"
               onChange={(event) => {
