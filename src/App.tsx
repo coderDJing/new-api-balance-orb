@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Eye, EyeOff, Power, RefreshCw, Save, Settings, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 
 const REFRESH_INTERVAL_MS = 60_000;
@@ -26,10 +28,21 @@ type BalanceSnapshot = {
   refreshedAtMs: number;
 };
 
+type WindowKind = "main" | "settings";
 type Status = "idle" | "loading" | "ok" | "error" | "setup";
+type SaveStatus = "idle" | "saving" | "saved" | "error";
+
+function isTauriRuntime() {
+  return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
+}
+
+function previewWindowKind(): WindowKind {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("window") === "settings" ? "settings" : "main";
+}
 
 async function runCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  if (typeof window === "undefined" || !window.__TAURI_INTERNALS__) {
+  if (!isTauriRuntime()) {
     return runPreviewCommand<T>(command, args);
   }
 
@@ -71,18 +84,29 @@ async function runPreviewCommand<T>(
 }
 
 function App() {
+  const [windowKind, setWindowKind] = useState<WindowKind>(previewWindowKind);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    setWindowKind(getCurrentWindow().label === "settings" ? "settings" : "main");
+  }, []);
+
+  return windowKind === "settings" ? <SettingsWindow /> : <BalanceWindow />;
+}
+
+function BalanceWindow() {
   const [config, setConfig] = useState<ClientConfig>({
     hasAccessToken: false,
   });
   const [snapshot, setSnapshot] = useState<BalanceSnapshot | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [accessToken, setAccessToken] = useState("");
-  const [endpointUrl, setEndpointUrl] = useState("");
-  const [userId, setUserId] = useState("");
-  const [showToken, setShowToken] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const promptedSetupRef = useRef(false);
+
+  const showSettings = useCallback(async () => {
+    await runCommand("show_settings_window").catch(() => undefined);
+  }, []);
 
   const refresh = useCallback(async () => {
     setStatus("loading");
@@ -94,7 +118,10 @@ function App() {
 
       if (!nextSnapshot.configured) {
         setStatus("setup");
-        setSettingsOpen(true);
+        if (!promptedSetupRef.current) {
+          promptedSetupRef.current = true;
+          await showSettings();
+        }
         return;
       }
 
@@ -103,7 +130,7 @@ function App() {
       setStatus("error");
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, []);
+  }, [showSettings]);
 
   useEffect(() => {
     let mounted = true;
@@ -113,12 +140,11 @@ function App() {
       if (!mounted) return;
 
       setConfig(loaded);
-      setEndpointUrl(loaded.endpointUrl || "");
-      setUserId(loaded.userId || "");
-      if (!loaded.hasAccessToken) {
-        setSettingsOpen(true);
+      if (!loaded.hasAccessToken || !loaded.endpointUrl || !loaded.userId) {
+        promptedSetupRef.current = true;
+        await showSettings();
       }
-      await refresh();
+      if (mounted) await refresh();
     }
 
     bootstrap().catch((err) => {
@@ -130,7 +156,7 @@ function App() {
     return () => {
       mounted = false;
     };
-  }, [refresh]);
+  }, [refresh, showSettings]);
 
   useEffect(() => {
     const timer = window.setInterval(refresh, REFRESH_INTERVAL_MS);
@@ -141,6 +167,25 @@ function App() {
     const ticker = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(ticker);
   }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+
+    let unlisten: (() => void) | undefined;
+    listen<ClientConfig>("config-saved", async (event) => {
+      setConfig(event.payload);
+      promptedSetupRef.current = false;
+      await refresh();
+    })
+      .then((handler) => {
+        unlisten = handler;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      unlisten?.();
+    };
+  }, [refresh]);
 
   const remainingText = useMemo(() => {
     if (typeof snapshot?.remaining !== "number") return "--";
@@ -159,30 +204,6 @@ function App() {
     Math.ceil((REFRESH_INTERVAL_MS - elapsed) / 1000),
   );
 
-  async function saveSettings() {
-    setStatus("loading");
-    setError("");
-
-    try {
-      const saved = await runCommand<ClientConfig>("save_config", {
-        endpointUrl: endpointUrl.trim(),
-        accessToken: accessToken.trim() || undefined,
-        userId: userId.trim(),
-      });
-      setConfig(saved);
-      setAccessToken("");
-      setSettingsOpen(false);
-      await refresh();
-    } catch (err) {
-      setStatus("error");
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  function hideWindow() {
-    runCommand("hide_window").catch(() => undefined);
-  }
-
   const healthText =
     status === "loading"
       ? "刷新中"
@@ -192,8 +213,16 @@ function App() {
           ? "待配置"
           : "在线";
 
+  const userLabel = snapshot?.username || config.userId || "未绑定";
+  const groupLabel = snapshot?.group || "default";
+  const refreshLabel = status === "ok" ? `${secondsLeft}s` : "--";
+  const requestLabel =
+    typeof snapshot?.requestCount === "number"
+      ? snapshot.requestCount.toLocaleString("zh-CN")
+      : "--";
+
   return (
-    <main className="shell">
+    <main className="shell main-shell">
       <div className="orb-window" data-tauri-drag-region>
         <header className="topbar" data-tauri-drag-region>
           <div className="brand" data-tauri-drag-region>
@@ -214,7 +243,7 @@ function App() {
               className="icon-button"
               type="button"
               title="设置"
-              onClick={() => setSettingsOpen((open) => !open)}
+              onClick={showSettings}
             >
               <Settings size={15} />
             </button>
@@ -244,69 +273,181 @@ function App() {
               {remainingText}
             </strong>
             <div className="meta-line">
-              <span>{snapshot?.username || config.userId || "未绑定"}</span>
-              <span>{snapshot?.group || "default"}</span>
-              <span>{status === "ok" ? `${secondsLeft}s` : "--"}</span>
+              <span>{userLabel}</span>
+              <span>{groupLabel}</span>
+              <span>{refreshLabel}</span>
             </div>
           </div>
         </section>
 
+        <footer className="orb-footer" data-tauri-drag-region>
+          <span>REQ</span>
+          <strong>{requestLabel}</strong>
+        </footer>
+
         {error && <div className="error-line">{error}</div>}
-
-        {settingsOpen && (
-          <section className="settings-panel">
-            <div className="field endpoint">
-              <label htmlFor="endpoint-url">API Endpoint</label>
-              <input
-                id="endpoint-url"
-                value={endpointUrl}
-                placeholder="https://example.com/api/user/self"
-                onChange={(event) => setEndpointUrl(event.currentTarget.value)}
-              />
-            </div>
-
-            <div className="field">
-              <label htmlFor="access-token">Access Token</label>
-              <div className="input-wrap">
-                <input
-                  id="access-token"
-                  type={showToken ? "text" : "password"}
-                  value={accessToken}
-                  placeholder={
-                    config.hasAccessToken ? "已保存，留空不改" : "安全设置里生成"
-                  }
-                  onChange={(event) => setAccessToken(event.currentTarget.value)}
-                />
-                <button
-                  className="inline-icon"
-                  type="button"
-                  title={showToken ? "隐藏" : "显示"}
-                  onClick={() => setShowToken((show) => !show)}
-                >
-                  {showToken ? <EyeOff size={14} /> : <Eye size={14} />}
-                </button>
-              </div>
-            </div>
-
-            <div className="field compact">
-              <label htmlFor="user-id">User ID</label>
-              <input
-                id="user-id"
-                value={userId}
-                placeholder="User ID"
-                onChange={(event) => setUserId(event.currentTarget.value)}
-              />
-            </div>
-
-            <button className="save-button" type="button" onClick={saveSettings}>
-              <Save size={14} />
-              <span>保存</span>
-            </button>
-          </section>
-        )}
       </div>
     </main>
   );
+}
+
+function SettingsWindow() {
+  const [config, setConfig] = useState<ClientConfig>({ hasAccessToken: false });
+  const [accessToken, setAccessToken] = useState("");
+  const [endpointUrl, setEndpointUrl] = useState("");
+  const [userId, setUserId] = useState("");
+  const [showToken, setShowToken] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+
+    runCommand<ClientConfig>("load_config")
+      .then((loaded) => {
+        if (!mounted) return;
+        setConfig(loaded);
+        setEndpointUrl(loaded.endpointUrl || "");
+        setUserId(loaded.userId || "");
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        setSaveStatus("error");
+        setError(err instanceof Error ? err.message : String(err));
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  async function saveSettings() {
+    setSaveStatus("saving");
+    setError("");
+
+    try {
+      const saved = await runCommand<ClientConfig>("save_config", {
+        endpointUrl: endpointUrl.trim(),
+        accessToken: accessToken.trim() || undefined,
+        userId: userId.trim(),
+      });
+      setConfig(saved);
+      setAccessToken("");
+      setSaveStatus("saved");
+    } catch (err) {
+      setSaveStatus("error");
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  const statusText =
+    saveStatus === "saving"
+      ? "保存中"
+      : saveStatus === "saved"
+        ? "已保存"
+        : saveStatus === "error"
+          ? "保存失败"
+          : config.hasAccessToken
+            ? "已配置"
+            : "未配置";
+
+  return (
+    <main className="shell settings-shell">
+      <section className="settings-window">
+        <header className="topbar settings-topbar" data-tauri-drag-region>
+          <div className="brand" data-tauri-drag-region>
+            <span className="brand-mark" />
+            <span>Settings</span>
+          </div>
+          <button
+            className="icon-button close"
+            type="button"
+            title="隐藏设置"
+            onClick={hideWindow}
+          >
+            <X size={15} />
+          </button>
+        </header>
+
+        <div className="settings-body">
+          <div className={`status-strip ${saveStatus}`}>
+            <span>{statusText}</span>
+          </div>
+
+          <label className="settings-field" htmlFor="endpoint-url">
+            <span>API Endpoint</span>
+            <input
+              id="endpoint-url"
+              value={endpointUrl}
+              placeholder="https://example.com/api/user/self"
+              onChange={(event) => {
+                setEndpointUrl(event.currentTarget.value);
+                setSaveStatus("idle");
+              }}
+            />
+          </label>
+
+          <label className="settings-field" htmlFor="access-token">
+            <span>Access Token</span>
+            <div className="input-wrap">
+              <input
+                id="access-token"
+                type={showToken ? "text" : "password"}
+                value={accessToken}
+                placeholder={config.hasAccessToken ? "已保存，留空不改" : "Access Token"}
+                onChange={(event) => {
+                  setAccessToken(event.currentTarget.value);
+                  setSaveStatus("idle");
+                }}
+              />
+              <button
+                className="inline-icon"
+                type="button"
+                title={showToken ? "隐藏" : "显示"}
+                onClick={() => setShowToken((show) => !show)}
+              >
+                {showToken ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            </div>
+          </label>
+
+          <label className="settings-field" htmlFor="user-id">
+            <span>User ID</span>
+            <input
+              id="user-id"
+              value={userId}
+              placeholder="User ID"
+              onChange={(event) => {
+                setUserId(event.currentTarget.value);
+                setSaveStatus("idle");
+              }}
+            />
+          </label>
+
+          {error && <div className="settings-error">{error}</div>}
+
+          <div className="settings-actions">
+            <button className="secondary-button" type="button" onClick={hideWindow}>
+              <span>隐藏</span>
+            </button>
+            <button
+              className="save-button"
+              type="button"
+              onClick={saveSettings}
+              disabled={saveStatus === "saving"}
+            >
+              <Save size={14} />
+              <span>{saveStatus === "saving" ? "保存中" : "保存"}</span>
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function hideWindow() {
+  runCommand("hide_window").catch(() => undefined);
 }
 
 export default App;

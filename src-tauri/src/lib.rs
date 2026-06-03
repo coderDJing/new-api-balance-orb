@@ -3,11 +3,14 @@ use std::{fs, path::PathBuf, time::Duration};
 use tauri::{
     menu::{Menu, MenuBuilder},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    App, AppHandle, Manager, Runtime, WebviewWindow, WindowEvent,
+    App, AppHandle, Emitter, Manager, Runtime, WebviewWindow, WindowEvent,
 };
 
 const QUOTA_SCALE: f64 = 500_000.0;
 const CONFIG_FILE: &str = "config.json";
+const WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+const WEBVIEW2_CRASH_REPORTER_FEATURE: &str = "msEdgeCrashReporter";
+const WEBVIEW2_SHUTDOWN_FLAGS: [&str; 2] = ["--disable-crash-reporter", "--disable-breakpad"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct StoredConfig {
@@ -96,7 +99,9 @@ fn save_config(
         user_id,
     };
     write_config(&app, &config)?;
-    Ok(client_config(Some(config)))
+    let next_config = client_config(Some(config));
+    let _ = app.emit_to("main", "config-saved", &next_config);
+    Ok(next_config)
 }
 
 #[tauri::command]
@@ -171,12 +176,21 @@ fn hide_window(window: WebviewWindow) -> Result<(), String> {
     window.hide().map_err(|err| err.to_string())
 }
 
+#[tauri::command]
+fn show_settings_window(app: AppHandle) -> Result<(), String> {
+    show_settings(&app).map_err(|err| err.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    configure_webview2_shutdown_flags();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            install_dev_shutdown_handler(app.handle().clone());
             install_tray(app)?;
+            position_main_window(app)?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -189,10 +203,66 @@ pub fn run() {
             load_config,
             save_config,
             query_balance,
-            hide_window
+            hide_window,
+            show_settings_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn configure_webview2_shutdown_flags() {
+    let existing = std::env::var(WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS).unwrap_or_default();
+    let mut arguments = existing
+        .split_whitespace()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    merge_disabled_webview2_feature(&mut arguments);
+
+    for flag in WEBVIEW2_SHUTDOWN_FLAGS {
+        if !arguments.iter().any(|existing| existing == flag) {
+            arguments.push(flag.to_string());
+        }
+    }
+
+    std::env::set_var(WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, arguments.join(" "));
+}
+
+fn merge_disabled_webview2_feature(arguments: &mut Vec<String>) {
+    for argument in arguments.iter_mut() {
+        let Some(disabled_features) = argument.strip_prefix("--disable-features=") else {
+            continue;
+        };
+
+        if !disabled_features
+            .split(',')
+            .any(|feature| feature == WEBVIEW2_CRASH_REPORTER_FEATURE)
+        {
+            argument.push(',');
+            argument.push_str(WEBVIEW2_CRASH_REPORTER_FEATURE);
+        }
+        return;
+    }
+
+    arguments.push(format!(
+        "--disable-features={WEBVIEW2_CRASH_REPORTER_FEATURE}"
+    ));
+}
+
+fn install_dev_shutdown_handler(app: AppHandle) {
+    #[cfg(debug_assertions)]
+    {
+        if let Err(err) = ctrlc::set_handler(move || {
+            app.exit(0);
+        }) {
+            eprintln!("安装开发退出处理失败: {err}");
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = app;
+    }
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -262,6 +332,9 @@ fn install_tray(app: &mut App) -> tauri::Result<()> {
         .tooltip("AI Balance Orb")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main_window(app),
+            "settings" => {
+                let _ = show_settings(app);
+            }
             "quit" => app.exit(0),
             _ => {}
         })
@@ -292,6 +365,7 @@ where
 {
     MenuBuilder::new(manager)
         .text("show", "显示余额窗")
+        .text("settings", "设置")
         .separator()
         .text("quit", "退出")
         .build()
@@ -302,6 +376,38 @@ fn show_main_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+fn show_settings(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.center();
+        window.show()?;
+        window.set_focus()?;
+    }
+
+    Ok(())
+}
+
+fn position_main_window(app: &App) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("main") {
+        // 窗口尺寸
+        let window_width = 348.0;
+        // 距屏幕边缘的边距
+        let margin = 20.0;
+
+        // 尝试获取主显示器尺寸，使用默认值作为兜底
+        let screen_width = match app.primary_monitor() {
+            Ok(Some(monitor)) => monitor.size().width as f64,
+            _ => 1920.0,
+        };
+
+        let x = screen_width - window_width - margin;
+        let y = margin;
+
+        window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)))?;
+    }
+
+    Ok(())
 }
 
 trait EmptyStringExt {

@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "check:desktop": "cargo check --manifest-path src-tauri/Cargo.toml"
+    "check:desktop": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "kill:dev": "powershell -ExecutionPolicy Bypass -File scripts/kill-dev.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
