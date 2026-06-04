@@ -622,3 +622,10 @@ button {
   filter: brightness(1.08);
   transform: translateY(-1px);
 }
+
+.settings-version {
+  text-align: center;
+  color: rgba(247, 251, 246, 0.35);
+  font-size: 11px;
+  padding-top: 8px;
+}

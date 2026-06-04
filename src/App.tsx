@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import { Save, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 
@@ -564,6 +565,7 @@ function SettingsWindow() {
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState("");
   const [setupHint, setSetupHint] = useState("");
+  const [appVersion, setAppVersion] = useState("");
 
   useEffect(() => {
     let mounted = true;
@@ -606,6 +608,16 @@ function SettingsWindow() {
     return () => {
       unlisten?.();
     };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+
+    getVersion()
+      .then((version) => {
+        setAppVersion(version);
+      })
+      .catch(() => undefined);
   }, []);
 
   async function saveSettings() {
@@ -744,6 +756,12 @@ function SettingsWindow() {
               <span>{saveStatus === "saving" ? "保存中" : "保存"}</span>
             </button>
           </div>
+
+          {appVersion && (
+            <div className="settings-version">
+              v{appVersion}
+            </div>
+          )}
         </div>
       </section>
     </main>
