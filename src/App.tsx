@@ -411,7 +411,30 @@ function BalanceWindow() {
         return;
       }
       refreshIntervalMs.current = (loaded.refreshIntervalSecs || 60) * 1000;
-      if (mounted) await refresh();
+
+      // 启动时先检查接口连通性
+      try {
+        const snapshot = await runCommand<BalanceSnapshot>("query_balance");
+        if (!mounted) return;
+
+        if (!snapshot.configured) {
+          promptedSetupRef.current = true;
+          await hideWindow();
+          await showSettings();
+          return;
+        }
+
+        const nextText = formatBalance(snapshot.remaining);
+        setBalanceText(nextText);
+        animateBalance(nextText);
+      } catch {
+        // 接口不连通，显示设置窗口
+        if (mounted) {
+          promptedSetupRef.current = true;
+          await hideWindow();
+          await showSettings();
+        }
+      }
     }
 
     bootstrap().catch(() => undefined);
