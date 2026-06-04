@@ -12,6 +12,7 @@ use tauri::{
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     App, AppHandle, Emitter, Manager, Runtime, WebviewWindow, WindowEvent,
 };
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_updater::UpdaterExt;
 
 const QUOTA_SCALE: f64 = 500_000.0;
@@ -29,6 +30,10 @@ fn default_refresh_interval() -> u64 {
     60
 }
 
+fn default_autostart() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct StoredConfig {
     endpoint_url: String,
@@ -36,6 +41,8 @@ struct StoredConfig {
     user_id: String,
     #[serde(default = "default_refresh_interval")]
     refresh_interval_secs: u64,
+    #[serde(default = "default_autostart")]
+    autostart_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +53,7 @@ struct ClientConfig {
     endpoint_url: Option<String>,
     user_id: Option<String>,
     refresh_interval_secs: u64,
+    autostart_enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +94,7 @@ async fn save_config(
     #[allow(non_snake_case)] accessToken: Option<String>,
     #[allow(non_snake_case)] userId: String,
     #[allow(non_snake_case)] refreshIntervalSecs: Option<u64>,
+    #[allow(non_snake_case)] autostartEnabled: Option<bool>,
 ) -> Result<ClientConfig, String> {
     let endpoint_url = endpointUrl.trim().trim_end_matches('/').to_string();
     if endpoint_url.is_empty() {
@@ -135,11 +144,20 @@ async fn save_config(
         })
         .clamp(10, 3600);
 
+    let autostart_enabled = autostartEnabled
+        .unwrap_or_else(|| {
+            existing
+                .as_ref()
+                .map(|c| c.autostart_enabled)
+                .unwrap_or(true)
+        });
+
     let config = StoredConfig {
         endpoint_url,
         access_token,
         user_id,
         refresh_interval_secs,
+        autostart_enabled,
     };
 
     // 先保存配置
@@ -148,6 +166,7 @@ async fn save_config(
     // 尝试查询余额验证配置是否有效
     match verify_config(&config).await {
         Ok(_) => {
+            sync_autostart(&app);
             let next_config = client_config(Some(config));
             let _ = app.emit_to("main", "config-saved", &next_config);
             Ok(next_config)
@@ -274,6 +293,10 @@ pub fn run() {
     configure_webview2_shutdown_flags();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
@@ -282,6 +305,7 @@ pub fn run() {
             position_main_window(app)?;
             start_fullscreen_monitor(app.handle().clone());
             spawn_auto_update_check(app.handle().clone());
+            sync_autostart(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -508,8 +532,24 @@ fn client_config(config: Option<StoredConfig>) -> ClientConfig {
             .map(|config| config.user_id.clone())
             .filter(|user_id| !user_id.is_empty()),
         refresh_interval_secs: config
+            .as_ref()
             .map(|config| config.refresh_interval_secs)
             .unwrap_or(60),
+        autostart_enabled: config
+            .map(|config| config.autostart_enabled)
+            .unwrap_or(true),
+    }
+}
+
+fn sync_autostart(app: &AppHandle) {
+    let manager = app.autolaunch();
+    let enabled = read_config(app)
+        .map(|c| c.autostart_enabled)
+        .unwrap_or(true);
+    if enabled {
+        let _ = manager.enable();
+    } else {
+        let _ = manager.disable();
     }
 }
 

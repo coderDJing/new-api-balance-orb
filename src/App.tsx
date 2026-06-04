@@ -29,6 +29,7 @@ type ClientConfig = {
   endpointUrl?: string;
   userId?: string;
   refreshIntervalSecs: number;
+  autostartEnabled: boolean;
 };
 
 type BalanceSnapshot = {
@@ -531,11 +532,12 @@ function BalanceWindow() {
 }
 
 function SettingsWindow() {
-  const [config, setConfig] = useState<ClientConfig>({ hasAccessToken: false, refreshIntervalSecs: 60 });
+  const [config, setConfig] = useState<ClientConfig>({ hasAccessToken: false, refreshIntervalSecs: 60, autostartEnabled: true });
   const [accessToken, setAccessToken] = useState("");
   const [endpointUrl, setEndpointUrl] = useState("");
   const [userId, setUserId] = useState("");
   const [refreshIntervalSecs, setRefreshIntervalSecs] = useState("60");
+  const [autostartEnabled, setAutostartEnabled] = useState(true);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState("");
   const [setupHint, setSetupHint] = useState("");
@@ -551,6 +553,7 @@ function SettingsWindow() {
         setAccessToken(loaded.accessToken || "");
         setUserId(loaded.userId || "");
         setRefreshIntervalSecs(String(loaded.refreshIntervalSecs || 60));
+        setAutostartEnabled(loaded.autostartEnabled ?? true);
       })
       .catch((err) => {
         if (!mounted) return;
@@ -593,10 +596,12 @@ function SettingsWindow() {
         accessToken: accessToken.trim() || undefined,
         userId: userId.trim(),
         refreshIntervalSecs: interval,
+        autostartEnabled,
       });
       setConfig(saved);
       setAccessToken(saved.accessToken || "");
       setRefreshIntervalSecs(String(saved.refreshIntervalSecs));
+      setAutostartEnabled(saved.autostartEnabled);
       setSaveStatus("saved");
 
       // 保存成功后关闭设置窗口
@@ -681,6 +686,20 @@ function SettingsWindow() {
               max={3600}
               onChange={(event) => {
                 setRefreshIntervalSecs(event.currentTarget.value);
+                setSaveStatus("idle");
+              }}
+            />
+          </label>
+
+          <label className="settings-field settings-field-toggle" htmlFor="autostart">
+            <span>开机自启动</span>
+            <input
+              id="autostart"
+              type="checkbox"
+              data-window-no-drag
+              checked={autostartEnabled}
+              onChange={(event) => {
+                setAutostartEnabled(event.currentTarget.checked);
                 setSaveStatus("idle");
               }}
             />

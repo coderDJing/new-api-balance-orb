@@ -529,6 +529,48 @@ button {
   -moz-appearance: textfield;
 }
 
+.settings-field-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-direction: row;
+}
+
+.settings-field-toggle input[type="checkbox"] {
+  width: 44px;
+  height: 24px;
+  padding: 0;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  appearance: none;
+  cursor: pointer;
+  position: relative;
+  transition: background 200ms ease;
+}
+
+.settings-field-toggle input[type="checkbox"]::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(247, 251, 246, 0.6);
+  transition: transform 200ms ease, background 200ms ease;
+}
+
+.settings-field-toggle input[type="checkbox"]:checked {
+  background: #69ffa7;
+  border-color: #69ffa7;
+}
+
+.settings-field-toggle input[type="checkbox"]:checked::before {
+  transform: translateX(20px);
+  background: #07110b;
+}
+
 .settings-error {
   height: 24px;
   overflow: hidden;
