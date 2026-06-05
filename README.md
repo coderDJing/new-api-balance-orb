@@ -42,6 +42,10 @@ Open Settings from the tray menu or the widget title bar, then enter:
 - Access Token from the provider security settings
 - User ID from the provider account
 
+<p align="center">
+  <img src="./docs/assets/form-guide.png" alt="New API form guide" width="720">
+</p>
+
 The app saves those values in the local Tauri app config directory on this
 machine.
 

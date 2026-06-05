@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { Save, Settings, X } from "lucide-react";
+import { CircleQuestionMark, Save, Settings, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
+import formGuideImage from "../docs/assets/form-guide.png";
 
 const DEFAULT_REFRESH_INTERVAL_MS = 60_000;
 const PREVIEW_BALANCE = 1286.734;
@@ -29,6 +30,7 @@ const UI_TEXT = {
     copied: "已复制",
     copyErrorTitle: "点击复制",
     endpointUrl: "接口地址",
+    formGuideAlt: "New API 表单填写指引",
     hide: "隐藏",
     hideSettings: "隐藏设置",
     loading: "查询中...",
@@ -48,6 +50,7 @@ const UI_TEXT = {
     copied: "Copied",
     copyErrorTitle: "Click to copy",
     endpointUrl: "Base URL",
+    formGuideAlt: "New API form guide",
     hide: "Hide",
     hideSettings: "Hide settings",
     loading: "Loading...",
@@ -761,18 +764,34 @@ function SettingsWindow() {
             <span className="brand-mark" />
             <span>{text.settings}</span>
           </div>
-          <button
-            className="icon-button close"
-            type="button"
-            title={text.hideSettings}
-            onClick={hideWindow}
-          >
-            <X size={15} />
-          </button>
+          <div className="settings-topbar-actions" data-window-no-drag>
+            <div className="guide-trigger">
+              <button
+                className="icon-button"
+                type="button"
+                title={text.formGuideAlt}
+                aria-label={text.formGuideAlt}
+              >
+                <CircleQuestionMark size={15} />
+              </button>
+              <figure className="settings-guide-popover">
+                <img src={formGuideImage} alt={text.formGuideAlt} />
+              </figure>
+            </div>
+            <button
+              className="icon-button close"
+              type="button"
+              title={text.hideSettings}
+              onClick={hideWindow}
+            >
+              <X size={15} />
+            </button>
+          </div>
         </header>
 
         <div className="settings-body">
           {setupHint && <div className="setup-hint">{setupHint}</div>}
+
           <label className="settings-field" htmlFor="endpoint-url">
             <span>{text.endpointUrl}</span>
             <input

@@ -489,8 +489,55 @@ button {
 }
 
 .settings-topbar {
+  z-index: 30;
   height: 42px;
   padding-right: 12px;
+}
+
+.settings-topbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.guide-trigger {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+}
+
+.settings-guide-popover {
+  position: absolute;
+  z-index: 20;
+  top: 34px;
+  right: 0;
+  width: 390px;
+  max-width: calc(100vw - 36px);
+  margin: 0;
+  overflow: hidden;
+  pointer-events: none;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: #111314;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.46);
+  opacity: 0;
+  transform: translateY(-4px) scale(0.985);
+  transform-origin: top right;
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+
+.guide-trigger:hover .settings-guide-popover,
+.guide-trigger:focus-within .settings-guide-popover {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.settings-guide-popover img {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 
 .settings-body {
