@@ -26,6 +26,7 @@ body,
 button,
 input {
   font: inherit;
+  -webkit-app-region: no-drag;
 }
 
 button {
@@ -363,6 +364,7 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
+  -webkit-app-region: no-drag;
   transition: color 150ms ease;
 }
 
@@ -387,6 +389,11 @@ button {
   -webkit-user-select: none;
   user-select: none;
   cursor: move;
+  -webkit-app-region: drag;
+}
+
+.main-shell {
+  -webkit-app-region: drag;
 }
 
 .brand {

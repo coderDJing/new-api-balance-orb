@@ -16,8 +16,6 @@ const INITIAL_FLAP_STEP_MS = 45;
 const MAX_COUNTER_STEPS = 160;
 const MAIN_WINDOW_MIN_WIDTH = 220;
 const MAIN_WINDOW_MAX_WIDTH = 520;
-const NON_DRAG_SELECTOR =
-  "button, input, textarea, select, label, a, [role='button'], [data-window-no-drag]";
 
 type UiLocale = "zh" | "en";
 
@@ -199,17 +197,6 @@ function App() {
   }, []);
 
   return windowKind === "settings" ? <SettingsWindow /> : <BalanceWindow />;
-}
-
-function startWindowDrag(event: React.MouseEvent<HTMLElement>) {
-  if (!isTauriRuntime() || event.button !== 0 || event.buttons !== 1) return;
-
-  const target = event.target;
-  if (!(target instanceof HTMLElement) || target.closest(NON_DRAG_SELECTOR)) {
-    return;
-  }
-
-  void getCurrentWindow().startDragging().catch(() => undefined);
 }
 
 function formatBalance(value: number | null): string {
@@ -588,7 +575,6 @@ function BalanceWindow() {
     <main
       className="shell main-shell"
       onContextMenu={showContextMenu}
-      onMouseDown={startWindowDrag}
       onDoubleClick={showSettings}
     >
       <div className="orb-window">
@@ -778,7 +764,7 @@ function SettingsWindow() {
   return (
     <main className="shell settings-shell">
       <section className="settings-window">
-        <header className="topbar settings-topbar" data-window-drag-handle onMouseDown={startWindowDrag}>
+        <header className="topbar settings-topbar" data-window-drag-handle>
           <div className="brand">
             <span className="brand-mark" />
             <span>{text.settings}</span>
