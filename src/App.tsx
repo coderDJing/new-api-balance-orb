@@ -632,6 +632,20 @@ function BalanceWindow() {
         onMouseDown={handleWindowMouseDown}
       >
         <div className="site-list">
+          {siteCount === 0 && (
+            <div className="site-block site-empty-block" onContextMenu={handleContextMenu}>
+              <button
+                className="site-empty-add-btn"
+                type="button"
+                title="新增站点"
+                aria-label="新增站点"
+                data-window-no-drag
+                onClick={(e) => { e.stopPropagation(); handleAddSite(); }}
+              >
+                <Plus size={18} strokeWidth={2.5} />
+              </button>
+            </div>
+          )}
           {sites.map((site, index) => {
             const balance = balances[site.id];
             const isConfigured = site.endpointUrl && site.hasAccessToken && site.userId;
