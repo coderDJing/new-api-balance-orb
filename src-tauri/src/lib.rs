@@ -25,7 +25,9 @@ const PROJECT_URL: &str = "https://github.com/coderDJing/new-api-balance-orb";
 const MAIN_WINDOW_DEFAULT_WIDTH: f64 = 280.0;
 const MAIN_WINDOW_MIN_WIDTH: f64 = 220.0;
 const MAIN_WINDOW_MAX_WIDTH: f64 = 520.0;
-const MAIN_WINDOW_HEIGHT: f64 = 120.0;
+const MAIN_WINDOW_HEIGHT: f64 = 148.0;
+const MAIN_WINDOW_ROW_HEIGHT: f64 = 106.0;
+const MAIN_WINDOW_VERTICAL_PADDING: f64 = 42.0;
 const MAIN_WINDOW_MARGIN: f64 = 20.0;
 const WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
 const WEBVIEW2_CRASH_REPORTER_FEATURE: &str = "msEdgeCrashReporter";
@@ -54,13 +56,6 @@ impl NativeText {
             Self::Zh
         } else {
             Self::En
-        }
-    }
-
-    fn settings(self) -> &'static str {
-        match self {
-            Self::Zh => "设置",
-            Self::En => "Settings",
         }
     }
 
@@ -152,6 +147,13 @@ impl NativeText {
         match self {
             Self::Zh => "Access Token 不能为空",
             Self::En => "Access Token is required",
+        }
+    }
+
+    fn site_not_found(self) -> &'static str {
+        match self {
+            Self::Zh => "站点不存在",
+            Self::En => "Site not found",
         }
     }
 
@@ -329,26 +331,53 @@ fn is_simplified_chinese_locale_name(locale_name: &str) -> bool {
         || normalized.starts_with("zh-hans-")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct StoredConfig {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SiteConfig {
+    id: String,
+    #[serde(default)]
+    display_name: String,
     endpoint_url: String,
     access_token: String,
     user_id: String,
     #[serde(default = "default_refresh_interval")]
     refresh_interval_secs: u64,
+    #[serde(default)]
+    sort_order: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredConfig {
+    #[serde(default = "default_config_version")]
+    version: u32,
     #[serde(default = "default_autostart")]
     autostart_enabled: bool,
+    #[serde(default)]
+    sites: Vec<SiteConfig>,
+}
+
+fn default_config_version() -> u32 {
+    2
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientSiteConfig {
+    id: String,
+    display_name: String,
+    endpoint_url: String,
+    has_access_token: bool,
+    access_token: Option<String>,
+    user_id: String,
+    refresh_interval_secs: u64,
+    sort_order: u32,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ClientConfig {
-    has_access_token: bool,
-    access_token: Option<String>,
-    endpoint_url: Option<String>,
-    user_id: Option<String>,
-    refresh_interval_secs: u64,
     autostart_enabled: bool,
+    sites: Vec<ClientSiteConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -383,13 +412,14 @@ fn load_config(app: AppHandle) -> Result<ClientConfig, String> {
 }
 
 #[tauri::command]
-async fn save_config(
+async fn save_site_config(
     app: AppHandle,
+    #[allow(non_snake_case)] siteId: Option<String>,
+    #[allow(non_snake_case)] displayName: Option<String>,
     #[allow(non_snake_case)] endpointUrl: String,
     #[allow(non_snake_case)] accessToken: Option<String>,
     #[allow(non_snake_case)] userId: String,
     #[allow(non_snake_case)] refreshIntervalSecs: Option<u64>,
-    #[allow(non_snake_case)] autostartEnabled: Option<bool>,
 ) -> Result<ClientConfig, String> {
     let text = NativeText::current();
     let endpoint_url = endpointUrl.trim().trim_end_matches('/').to_string();
@@ -397,7 +427,6 @@ async fn save_config(
         return Err(text.endpoint_empty().to_string());
     }
 
-    // 自动补全协议
     let endpoint_url =
         if endpoint_url.starts_with("http://") || endpoint_url.starts_with("https://") {
             endpoint_url
@@ -419,15 +448,19 @@ async fn save_config(
         return Err(text.user_id_empty().to_string());
     }
 
-    let existing = read_config(&app).ok();
+    let mut config = read_config(&app)?;
+
+    let existing_site = siteId
+        .as_deref()
+        .and_then(|id| config.sites.iter().find(|s| s.id == id));
+
     let access_token = accessToken
         .unwrap_or_default()
         .trim()
         .to_string()
         .if_empty_then(|| {
-            existing
-                .as_ref()
-                .map(|config| config.access_token.clone())
+            existing_site
+                .map(|s| s.access_token.clone())
                 .unwrap_or_default()
         });
 
@@ -436,88 +469,95 @@ async fn save_config(
     }
 
     let refresh_interval_secs = refreshIntervalSecs
-        .unwrap_or_else(|| {
-            existing
-                .as_ref()
-                .map(|c| c.refresh_interval_secs)
-                .unwrap_or(60)
-        })
+        .unwrap_or_else(|| existing_site.map(|s| s.refresh_interval_secs).unwrap_or(60))
         .clamp(10, 3600);
 
-    let autostart_enabled = autostartEnabled.unwrap_or_else(|| {
-        existing
-            .as_ref()
-            .map(|c| c.autostart_enabled)
-            .unwrap_or(true)
-    });
+    let display_name = displayName.unwrap_or_default().trim().to_string();
 
-    let config = StoredConfig {
-        endpoint_url,
-        access_token,
-        user_id,
+    let site_for_verify = SiteConfig {
+        id: String::new(),
+        display_name: display_name.clone(),
+        endpoint_url: endpoint_url.clone(),
+        access_token: access_token.clone(),
+        user_id: user_id.clone(),
         refresh_interval_secs,
-        autostart_enabled,
+        sort_order: 0,
     };
 
-    // 先保存配置
-    write_config(&app, &config)?;
-
-    // 尝试查询余额验证配置是否有效
-    match verify_config(&config).await {
-        Ok(_) => {
-            sync_autostart(&app);
-            let next_config = client_config(Some(config));
-            let _ = app.emit_to("main", "config-saved", &next_config);
-            Ok(next_config)
-        }
-        Err(err) => {
-            // 验证失败，恢复原配置
-            if let Some(old_config) = existing {
-                let _ = write_config(&app, &old_config);
-            }
-            Err(text.validation_failed(err))
-        }
+    if let Err(err) = verify_config(&site_for_verify).await {
+        return Err(text.validation_failed(err));
     }
+
+    if let Some(id) = siteId.as_deref() {
+        let site = config
+            .sites
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or_else(|| text.site_not_found().to_string())?;
+        site.display_name = display_name;
+        site.endpoint_url = endpoint_url;
+        site.access_token = access_token;
+        site.user_id = user_id;
+        site.refresh_interval_secs = refresh_interval_secs;
+    } else {
+        let max_order = config.sites.iter().map(|s| s.sort_order).max().unwrap_or(0);
+        config.sites.push(SiteConfig {
+            id: format!("site_{}", now_ms()),
+            display_name,
+            endpoint_url,
+            access_token,
+            user_id,
+            refresh_interval_secs,
+            sort_order: max_order + 1,
+        });
+    }
+
+    write_config(&app, &config)?;
+    sync_autostart(&app);
+    resize_main_window_for_site_count(&app, config.sites.len());
+    let next = client_config(Some(config));
+    let _ = app.emit_to("main", "config-saved", &next);
+    Ok(next)
 }
 
 #[tauri::command]
-async fn query_balance(app: AppHandle) -> Result<BalanceSnapshot, String> {
+async fn query_site_balance(
+    app: AppHandle,
+    #[allow(non_snake_case)] siteId: String,
+) -> Result<BalanceSnapshot, String> {
     let text = NativeText::current();
-    let config = match read_config(&app) {
-        Ok(config)
-            if !config.endpoint_url.is_empty()
-                && !config.access_token.is_empty()
-                && !config.user_id.is_empty() =>
-        {
-            config
-        }
-        _ => {
-            return Ok(BalanceSnapshot {
-                configured: false,
-                remaining: None,
-                username: None,
-                group: None,
-                request_count: None,
-                refreshed_at_ms: now_ms(),
-            });
-        }
-    };
+    let config = read_config(&app)?;
+    let site = config
+        .sites
+        .iter()
+        .find(|s| s.id == siteId)
+        .ok_or_else(|| text.site_not_found().to_string())?;
+
+    if site.endpoint_url.is_empty() || site.access_token.is_empty() || site.user_id.is_empty() {
+        return Ok(BalanceSnapshot {
+            configured: false,
+            remaining: None,
+            username: None,
+            group: None,
+            request_count: None,
+            refreshed_at_ms: now_ms(),
+        });
+    }
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(10))
         .user_agent("new-api-balance-orb/0.1")
+        .http1_only()
         .build()
         .map_err(|err| text.http_client_failed(err))?;
 
-    let url = format!(
-        "{}/api/user/self",
-        config.endpoint_url.trim_end_matches('/')
-    );
+    let url = format!("{}/api/user/self", site.endpoint_url.trim_end_matches('/'));
 
     let response = client
         .get(&url)
-        .header("Authorization", format!("Bearer {}", config.access_token))
-        .header("New-Api-User", &config.user_id)
+        .header("Authorization", format!("Bearer {}", site.access_token))
+        .header("New-Api-User", &site.user_id)
         .send()
         .await
         .map_err(|err| text.request_failed_with_url(&url, err))?;
@@ -545,6 +585,7 @@ async fn query_balance(app: AppHandle) -> Result<BalanceSnapshot, String> {
     let data = parsed
         .data
         .ok_or_else(|| text.response_missing_data().to_string())?;
+
     Ok(BalanceSnapshot {
         configured: true,
         remaining: Some(data.quota / QUOTA_SCALE),
@@ -556,22 +597,81 @@ async fn query_balance(app: AppHandle) -> Result<BalanceSnapshot, String> {
 }
 
 #[tauri::command]
+fn delete_site(
+    app: AppHandle,
+    #[allow(non_snake_case)] siteId: String,
+) -> Result<ClientConfig, String> {
+    let mut config = read_config(&app)?;
+    config.sites.retain(|s| s.id != siteId);
+    for (i, site) in config.sites.iter_mut().enumerate() {
+        site.sort_order = i as u32;
+    }
+    write_config(&app, &config)?;
+    resize_main_window_for_site_count(&app, config.sites.len());
+    let next = client_config(Some(config));
+    let _ = app.emit_to("main", "config-saved", &next);
+    Ok(next)
+}
+
+#[tauri::command]
+fn update_site_orders(
+    app: AppHandle,
+    #[allow(non_snake_case)] siteIds: Vec<String>,
+) -> Result<ClientConfig, String> {
+    let mut config = read_config(&app)?;
+    for (i, id) in siteIds.iter().enumerate() {
+        if let Some(site) = config.sites.iter_mut().find(|s| s.id == *id) {
+            site.sort_order = i as u32;
+        }
+    }
+    config.sites.sort_by_key(|s| s.sort_order);
+    write_config(&app, &config)?;
+    resize_main_window_for_site_count(&app, config.sites.len());
+    let next = client_config(Some(config));
+    let _ = app.emit_to("main", "config-saved", &next);
+    Ok(next)
+}
+
+#[tauri::command]
 fn hide_window(window: WebviewWindow) -> Result<(), String> {
     window.hide().map_err(|err| err.to_string())
 }
 
 #[tauri::command]
-fn show_settings_window(app: AppHandle) -> Result<(), String> {
+fn show_settings_window(
+    app: AppHandle,
+    #[allow(non_snake_case)] newSite: Option<bool>,
+    #[allow(non_snake_case)] editSiteId: Option<String>,
+) -> Result<(), String> {
+    if newSite.unwrap_or(false) {
+        let _ = app.emit_to("settings", "new-site", ());
+    } else if let Some(site_id) = editSiteId {
+        let _ = app.emit_to("settings", "edit-site", site_id);
+    } else {
+        let _ = app.emit_to("settings", "refresh-form", ());
+    }
     show_settings(&app).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
-fn resize_main_window(app: AppHandle, width: f64) -> Result<(), String> {
+fn resize_main_window(app: AppHandle, width: f64, height: Option<f64>) -> Result<(), String> {
+    resize_main_window_to(&app, width, height)
+}
+
+fn resize_main_window_to(app: &AppHandle, width: f64, height: Option<f64>) -> Result<(), String> {
     let text = NativeText::current();
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| text.main_window_missing().to_string())?;
     let width = width.clamp(MAIN_WINDOW_MIN_WIDTH, MAIN_WINDOW_MAX_WIDTH);
+    let scale = window
+        .scale_factor()
+        .ok()
+        .filter(|scale| *scale > 0.0)
+        .unwrap_or(1.0);
+    let height = height
+        .unwrap_or_else(|| logical_window_height(&window, scale))
+        .max(MAIN_WINDOW_HEIGHT);
 
     window
         .set_min_size(Some(LogicalSize::new(
@@ -580,20 +680,40 @@ fn resize_main_window(app: AppHandle, width: f64) -> Result<(), String> {
         )))
         .map_err(|err| err.to_string())?;
     window
-        .set_max_size(Some(LogicalSize::new(
-            MAIN_WINDOW_MAX_WIDTH,
-            MAIN_WINDOW_HEIGHT,
-        )))
+        .set_max_size(Some(LogicalSize::new(MAIN_WINDOW_MAX_WIDTH, 2000.0)))
         .map_err(|err| err.to_string())?;
     window
-        .set_size(LogicalSize::new(width, MAIN_WINDOW_HEIGHT))
+        .set_size(LogicalSize::new(width, height))
         .map_err(|err| err.to_string())?;
-    position_window_top_right(&window).map_err(|err| err.to_string())
+    Ok(())
+}
+
+fn main_window_height_for_site_count(site_count: usize) -> f64 {
+    let rows = site_count.max(1) as f64;
+    (rows * MAIN_WINDOW_ROW_HEIGHT + MAIN_WINDOW_VERTICAL_PADDING).max(MAIN_WINDOW_HEIGHT)
+}
+
+fn resize_main_window_for_site_count(app: &AppHandle, site_count: usize) {
+    let width = app
+        .get_webview_window("main")
+        .map(|window| logical_window_width(&window))
+        .unwrap_or(MAIN_WINDOW_DEFAULT_WIDTH);
+    let height = main_window_height_for_site_count(site_count);
+    if let Err(err) = resize_main_window_to(app, width, Some(height)) {
+        log::warn!("Failed to resize main window for site count {site_count}: {err}");
+    }
+}
+
+fn resize_main_window_from_config(app: &AppHandle) {
+    let site_count = read_config(app)
+        .map(|config| config.sites.len())
+        .unwrap_or(1);
+    resize_main_window_for_site_count(app, site_count);
 }
 
 #[tauri::command]
 fn show_balance_context_menu(window: WebviewWindow, x: f64, y: f64) -> Result<(), String> {
-    let menu = build_tray_menu(&window).map_err(|err| err.to_string())?;
+    let menu = build_balance_context_menu(&window).map_err(|err| err.to_string())?;
     window
         .popup_menu_at(&menu, Position::Logical(LogicalPosition::new(x, y)))
         .map_err(|err| err.to_string())
@@ -631,6 +751,7 @@ pub fn run() {
         .setup(|app| {
             install_dev_shutdown_handler(app.handle().clone());
             install_tray(app)?;
+            resize_main_window_from_config(app.handle());
             position_main_window(app)?;
             start_fullscreen_monitor(app.handle().clone());
             spawn_auto_update_check(app.handle().clone());
@@ -645,8 +766,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             load_config,
-            save_config,
-            query_balance,
+            save_site_config,
+            delete_site,
+            query_site_balance,
+            update_site_orders,
             hide_window,
             show_settings_window,
             resize_main_window,
@@ -790,11 +913,65 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join(CONFIG_FILE))
 }
 
+fn migrate_v1_config(old_json: &str) -> Result<StoredConfig, String> {
+    #[derive(Deserialize)]
+    struct V1Config {
+        endpoint_url: Option<String>,
+        access_token: Option<String>,
+        user_id: Option<String>,
+        #[serde(default = "default_refresh_interval")]
+        refresh_interval_secs: u64,
+        #[serde(default = "default_autostart")]
+        autostart_enabled: bool,
+    }
+
+    let text = NativeText::current();
+    let v1: V1Config = serde_json::from_str(old_json).map_err(|e| text.parse_config_failed(e))?;
+
+    let has_site = v1.endpoint_url.as_deref().is_some_and(|s| !s.is_empty())
+        && v1.access_token.as_deref().is_some_and(|s| !s.is_empty())
+        && v1.user_id.as_deref().is_some_and(|s| !s.is_empty());
+
+    let sites = if has_site {
+        vec![SiteConfig {
+            id: format!("site_{}", now_ms()),
+            display_name: String::new(),
+            endpoint_url: v1.endpoint_url.unwrap_or_default(),
+            access_token: v1.access_token.unwrap_or_default(),
+            user_id: v1.user_id.unwrap_or_default(),
+            refresh_interval_secs: v1.refresh_interval_secs,
+            sort_order: 0,
+        }]
+    } else {
+        vec![]
+    };
+
+    Ok(StoredConfig {
+        version: 2,
+        autostart_enabled: v1.autostart_enabled,
+        sites,
+    })
+}
+
 fn read_config(app: &AppHandle) -> Result<StoredConfig, String> {
     let text = NativeText::current();
     let path = config_path(app)?;
     let config_text = fs::read_to_string(&path).map_err(|err| text.read_config_failed(err))?;
-    serde_json::from_str(&config_text).map_err(|err| text.parse_config_failed(err))
+
+    match serde_json::from_str::<StoredConfig>(&config_text) {
+        Ok(config) => return Ok(config),
+        Err(v2_err) => match migrate_v1_config(&config_text) {
+            Ok(migrated) => {
+                if let Err(e) = write_config(app, &migrated) {
+                    log::warn!("Failed to persist migrated config: {e}");
+                }
+                return Ok(migrated);
+            }
+            Err(_) => {
+                return Err(text.parse_config_failed(v2_err));
+            }
+        },
+    }
 }
 
 fn write_config(app: &AppHandle, config: &StoredConfig) -> Result<(), String> {
@@ -805,23 +982,22 @@ fn write_config(app: &AppHandle, config: &StoredConfig) -> Result<(), String> {
     fs::write(path, config_text).map_err(|err| text.write_config_failed(err))
 }
 
-async fn verify_config(config: &StoredConfig) -> Result<(), String> {
+async fn verify_config(site: &SiteConfig) -> Result<(), String> {
     let text = NativeText::current();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(10))
         .user_agent("new-api-balance-orb/0.1")
+        .http1_only()
         .build()
         .map_err(|err| text.http_client_failed(err))?;
 
-    let url = format!(
-        "{}/api/user/self",
-        config.endpoint_url.trim_end_matches('/')
-    );
+    let url = format!("{}/api/user/self", site.endpoint_url.trim_end_matches('/'));
 
     let response = client
         .get(&url)
-        .header("Authorization", format!("Bearer {}", config.access_token))
-        .header("New-Api-User", &config.user_id)
+        .header("Authorization", format!("Bearer {}", site.access_token))
+        .header("New-Api-User", &site.user_id)
         .send()
         .await
         .map_err(|err| text.request_failed(err))?;
@@ -850,29 +1026,28 @@ async fn verify_config(config: &StoredConfig) -> Result<(), String> {
 }
 
 fn client_config(config: Option<StoredConfig>) -> ClientConfig {
+    let config = config.unwrap_or(StoredConfig {
+        version: 2,
+        autostart_enabled: true,
+        sites: vec![],
+    });
+
     ClientConfig {
-        has_access_token: config
-            .as_ref()
-            .is_some_and(|config| !config.access_token.is_empty()),
-        access_token: config
-            .as_ref()
-            .map(|config| config.access_token.clone())
-            .filter(|token| !token.is_empty()),
-        endpoint_url: config
-            .as_ref()
-            .map(|config| config.endpoint_url.clone())
-            .filter(|endpoint_url| !endpoint_url.is_empty()),
-        user_id: config
-            .as_ref()
-            .map(|config| config.user_id.clone())
-            .filter(|user_id| !user_id.is_empty()),
-        refresh_interval_secs: config
-            .as_ref()
-            .map(|config| config.refresh_interval_secs)
-            .unwrap_or(60),
-        autostart_enabled: config
-            .map(|config| config.autostart_enabled)
-            .unwrap_or(true),
+        autostart_enabled: config.autostart_enabled,
+        sites: config
+            .sites
+            .into_iter()
+            .map(|site| ClientSiteConfig {
+                id: site.id,
+                display_name: site.display_name,
+                endpoint_url: site.endpoint_url,
+                has_access_token: !site.access_token.is_empty(),
+                access_token: Some(site.access_token).filter(|t| !t.is_empty()),
+                user_id: site.user_id,
+                refresh_interval_secs: site.refresh_interval_secs,
+                sort_order: site.sort_order,
+            })
+            .collect(),
     }
 }
 
@@ -946,9 +1121,6 @@ fn install_tray(app: &mut App) -> tauri::Result<()> {
 
 fn handle_menu_action(app: &AppHandle, id: &str) {
     match id {
-        "settings" => {
-            let _ = show_settings(app);
-        }
         "check_update" => spawn_manual_update_check(app.clone()),
         "project_site" => {
             let _ = app.opener().open_url(PROJECT_URL, None::<&str>);
@@ -1001,7 +1173,20 @@ where
 {
     let text = NativeText::current();
     MenuBuilder::new(manager)
-        .text("settings", text.settings())
+        .text("check_update", text.check_update())
+        .text("project_site", text.project_site())
+        .separator()
+        .text("quit", text.quit())
+        .build()
+}
+
+fn build_balance_context_menu<R, M>(manager: &M) -> tauri::Result<Menu<R>>
+where
+    R: Runtime,
+    M: Manager<R>,
+{
+    let text = NativeText::current();
+    MenuBuilder::new(manager)
         .text("check_update", text.check_update())
         .text("project_site", text.project_site())
         .separator()
@@ -1010,11 +1195,13 @@ where
 }
 
 fn show_main_window(app: &AppHandle) {
-    // 检查配置是否完整，未配置时只显示设置窗口并提示
-    let config_ready = read_config(app).map_or(false, |config| {
-        !config.endpoint_url.is_empty()
-            && !config.access_token.is_empty()
-            && !config.user_id.is_empty()
+    let config = read_config(app).ok();
+    let config_ready = config.as_ref().map_or(false, |config| {
+        config.sites.iter().any(|site| {
+            !site.endpoint_url.is_empty()
+                && !site.access_token.is_empty()
+                && !site.user_id.is_empty()
+        })
     });
 
     if !config_ready {
@@ -1026,6 +1213,8 @@ fn show_main_window(app: &AppHandle) {
         let _ = show_settings(app);
         return;
     }
+
+    resize_main_window_for_site_count(app, config.map(|config| config.sites.len()).unwrap_or(1));
 
     if let Some(window) = app.get_webview_window("main") {
         reveal_window(&window);
@@ -1098,6 +1287,13 @@ fn logical_window_width(window: &WebviewWindow) -> f64 {
         .inner_size()
         .map(|size| size.width as f64 / scale)
         .unwrap_or(MAIN_WINDOW_DEFAULT_WIDTH)
+}
+
+fn logical_window_height(window: &WebviewWindow, scale: f64) -> f64 {
+    window
+        .inner_size()
+        .map(|size| size.height as f64 / scale)
+        .unwrap_or(MAIN_WINDOW_HEIGHT)
 }
 
 trait EmptyStringExt {

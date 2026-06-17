@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { CircleQuestionMark, Save, Settings, X } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  CircleQuestionMark,
+  Plus,
+  Save,
+  Settings,
+  Trash2,
+  X,
+} from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
@@ -8,21 +17,21 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 import formGuideImage from "../docs/assets/form-guide.png";
 
-const DEFAULT_REFRESH_INTERVAL_MS = 60_000;
 const PREVIEW_BALANCE = 1286.734;
-const FLAP_DURATION_MS = 288;
-const FLAP_STEP_MS = 305;
-const INITIAL_FLAP_STEP_MS = 45;
-const MAX_COUNTER_STEPS = 160;
-const MAIN_WINDOW_MIN_WIDTH = 220;
+const MAIN_WINDOW_MIN_WIDTH = 244;
 const MAIN_WINDOW_MAX_WIDTH = 520;
+const MAIN_WINDOW_SIDE_CONTROL_WIDTH = 40;
+const MAIN_WINDOW_HORIZONTAL_PADDING = 18;
+const SITE_FLAP_DIGIT_WIDTH = 30;
+const SITE_FLAP_DECIMAL_WIDTH = 9;
+const SITE_FLAP_MINUS_WIDTH = 19;
+const SITE_FLAP_STATIC_WIDTH = 9;
 
 type UiLocale = "zh" | "en";
 
 const UI_TEXT = {
   zh: {
     accessToken: "Access Token",
-    accessTokenSavedPlaceholder: "已保存，留空不改",
     autostart: "开机自启动",
     balanceAriaLabel: "余额",
     copied: "已复制",
@@ -42,7 +51,6 @@ const UI_TEXT = {
   },
   en: {
     accessToken: "Access Token",
-    accessTokenSavedPlaceholder: "Saved; leave blank to keep it",
     autostart: "Launch at startup",
     balanceAriaLabel: "Balance",
     copied: "Copied",
@@ -68,13 +76,20 @@ declare global {
   }
 }
 
-type ClientConfig = {
+type SiteConfig = {
+  id: string;
+  displayName: string;
+  endpointUrl: string;
   hasAccessToken: boolean;
-  accessToken?: string;
-  endpointUrl?: string;
-  userId?: string;
+  accessToken: string;
+  userId: string;
   refreshIntervalSecs: number;
+  sortOrder: number;
+};
+
+type ClientConfig = {
   autostartEnabled: boolean;
+  sites: SiteConfig[];
 };
 
 type BalanceSnapshot = {
@@ -86,18 +101,88 @@ type BalanceSnapshot = {
   refreshedAtMs: number;
 };
 
-type WindowKind = "main" | "settings";
-type SaveStatus = "idle" | "saving" | "saved" | "error";
-type ActiveFlip = {
-  from: string;
-  to: string;
-  version: number;
+type SiteBalanceSnapshot = {
+  siteId: string;
+  configured: boolean;
+  remaining: number | null;
+  username?: string | null;
+  group?: string | null;
+  requestCount?: number | null;
+  refreshedAtMs: number;
+  error?: string | null;
 };
 
-type FlipTransition = ActiveFlip & {
-  delayMs: number;
-  index: number;
+type WindowKind = "main" | "settings";
+type SaveStatus = "idle" | "saving" | "saved" | "error";
+
+type ConfirmOptions = {
+  title?: string;
+  message: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  danger?: boolean;
 };
+
+function useConfirmDialog() {
+  const [options, setOptions] = useState<ConfirmOptions | null>(null);
+  const resolveRef = useRef<((value: boolean) => void) | null>(null);
+
+  const confirm = useCallback((opts: ConfirmOptions): Promise<boolean> => {
+    return new Promise((resolve) => {
+      resolveRef.current = resolve;
+      setOptions(opts);
+    });
+  }, []);
+
+  const handleConfirm = useCallback(() => {
+    resolveRef.current?.(true);
+    resolveRef.current = null;
+    setOptions(null);
+  }, []);
+
+  const handleCancel = useCallback(() => {
+    resolveRef.current?.(false);
+    resolveRef.current = null;
+    setOptions(null);
+  }, []);
+
+  return { options, confirm, handleConfirm, handleCancel };
+}
+
+type AnchoredConfirmState = ConfirmOptions & {
+  siteId: string;
+};
+
+function ConfirmDialog({
+  title = "确认操作",
+  message,
+  confirmLabel = "确定",
+  cancelLabel = "取消",
+  danger = false,
+  onConfirm,
+  onCancel,
+}: ConfirmOptions & { onConfirm: () => void; onCancel: () => void }) {
+  return (
+    <div className="confirm-overlay" onClick={onCancel}>
+      <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="confirm-title">{title}</div>
+        <p className="confirm-message">{message}</p>
+        <div className="confirm-actions">
+          <button className="secondary-button" type="button" onClick={onCancel}>
+            {cancelLabel}
+          </button>
+          <button
+            className={danger ? "confirm-danger-button" : "save-button"}
+            type="button"
+            onClick={onConfirm}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function isTauriRuntime() {
   return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
@@ -148,15 +233,33 @@ async function runPreviewCommand<T>(
 ): Promise<T> {
   if (command === "load_config") {
     return {
-      hasAccessToken: true,
-      accessToken: "",
-      endpointUrl: "https://example.com",
-      userId: "preview",
-      refreshIntervalSecs: 60,
+      autostartEnabled: true,
+      sites: [
+        {
+          id: "preview_1",
+          displayName: "主站",
+          endpointUrl: "https://api.example.com",
+          hasAccessToken: true,
+          accessToken: "sk-preview-token",
+          userId: "preview",
+          refreshIntervalSecs: 60,
+          sortOrder: 0,
+        },
+        {
+          id: "preview_2",
+          displayName: "备用站",
+          endpointUrl: "https://backup.example.com",
+          hasAccessToken: true,
+          accessToken: "sk-preview-token",
+          userId: "preview",
+          refreshIntervalSecs: 60,
+          sortOrder: 1,
+        },
+      ],
     } as T;
   }
 
-  if (command === "query_balance") {
+  if (command === "query_balance" || command === "query_site_balance") {
     return {
       configured: true,
       remaining: PREVIEW_BALANCE,
@@ -167,14 +270,33 @@ async function runPreviewCommand<T>(
     } as T;
   }
 
-  if (command === "save_config") {
+  if (command === "save_config" || command === "save_site_config") {
     return {
-      hasAccessToken: Boolean(args?.accessToken),
-      accessToken: String(args?.accessToken || ""),
-      endpointUrl: String(args?.endpointUrl || ""),
-      userId: String(args?.userId || ""),
-      refreshIntervalSecs: Number(args?.refreshIntervalSecs) || 60,
+      autostartEnabled: true,
+      sites: [
+        {
+          id: "preview_1",
+          displayName: "",
+          endpointUrl: String(args?.endpointUrl || "https://example.com"),
+          hasAccessToken: Boolean(args?.accessToken),
+          accessToken: String(args?.accessToken || ""),
+          userId: String(args?.userId || "preview"),
+          refreshIntervalSecs: Number(args?.refreshIntervalSecs) || 60,
+          sortOrder: 0,
+        },
+      ],
     } as T;
+  }
+
+  if (command === "delete_site") {
+    return {
+      autostartEnabled: true,
+      sites: [],
+    } as T;
+  }
+
+  if (command === "update_site_orders") {
+    return undefined as T;
   }
 
   if (command === "resize_main_window") {
@@ -186,6 +308,35 @@ async function runPreviewCommand<T>(
   }
 
   return undefined as T;
+}
+
+function InlineConfirmDialog({
+  title = "确认操作",
+  message,
+  confirmLabel = "确定",
+  cancelLabel = "取消",
+  danger = false,
+  onConfirm,
+  onCancel,
+}: ConfirmOptions & { onConfirm: () => void; onCancel: () => void }) {
+  return (
+    <div className="inline-confirm" onClick={(e) => e.stopPropagation()}>
+      <div className="inline-confirm-title">{title}</div>
+      <div className="inline-confirm-message">{message}</div>
+      <div className="inline-confirm-actions">
+        <button className="inline-confirm-cancel" type="button" onClick={onCancel}>
+          {cancelLabel}
+        </button>
+        <button
+          className={danger ? "inline-confirm-danger" : "inline-confirm-primary"}
+          type="button"
+          onClick={onConfirm}
+        >
+          {confirmLabel}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function App() {
@@ -206,463 +357,381 @@ function formatBalance(value: number | null): string {
 }
 
 function measureBalanceWindowWidth(text: string) {
-  const contentWidth = text.split("").reduce((width, char) => {
-    if (isFlipDigit(char)) return width + 28;
-    if (char === ".") return width + 9;
-    if (char === "-") return width + 18;
-    return width + 8;
-  }, 60);
+  const unscaledContentWidth = text.split("").reduce((width, char) => {
+    if (isFlipDigit(char)) return width + SITE_FLAP_DIGIT_WIDTH;
+    if (char === ".") return width + SITE_FLAP_DECIMAL_WIDTH;
+    if (char === "-") return width + SITE_FLAP_MINUS_WIDTH;
+    return width + SITE_FLAP_STATIC_WIDTH;
+  }, 8);
   const gapWidth = Math.max(0, text.length - 1);
+  const contentWidth = (unscaledContentWidth + gapWidth) * getSiteFlapScale(text.length);
+  const fixedChromeWidth = MAIN_WINDOW_HORIZONTAL_PADDING + MAIN_WINDOW_SIDE_CONTROL_WIDTH;
   return Math.max(
     MAIN_WINDOW_MIN_WIDTH,
-    Math.min(MAIN_WINDOW_MAX_WIDTH, Math.ceil(contentWidth + gapWidth)),
+    Math.min(
+      MAIN_WINDOW_MAX_WIDTH,
+      Math.ceil(contentWidth + gapWidth + fixedChromeWidth),
+    ),
   );
+}
+
+function getSiteFlapScale(length: number) {
+  return Math.max(0.76, Math.min(0.9, 10.8 / Math.max(length, 1)));
 }
 
 function isFlipDigit(char: string) {
   return char >= "0" && char <= "9";
 }
 
-function parseDisplayNumber(text: string) {
-  const value = Number(text);
-  return Number.isFinite(value) ? value : null;
-}
-
-function parseDisplayUnits(text: string) {
-  const value = parseDisplayNumber(text);
-  return value == null ? null : Math.round(value * 1000);
-}
-
-function hasSameStaticLayout(startText: string, targetText: string) {
-  if (startText.length !== targetText.length) return false;
-
-  for (let index = 0; index < targetText.length; index += 1) {
-    if (isFlipDigit(targetText[index])) continue;
-    if (startText[index] !== targetText[index]) return false;
-  }
-
-  return true;
-}
-
-function previousCharAt(previousText: string, currentIndex: number, currentLength: number) {
-  const previousIndex = currentIndex - (currentLength - previousText.length);
-  return previousIndex >= 0 ? previousText[previousIndex] || "" : "";
-}
-
-function alignStartText(previousText: string, targetText: string, initial: boolean) {
-  const targetChars = targetText.split("");
-  return targetChars
-    .map((char, index) => {
-      if (!isFlipDigit(char)) return char;
-      if (initial) return "0";
-
-      const previousChar = previousCharAt(previousText, index, targetChars.length);
-      return isFlipDigit(previousChar) ? previousChar : "0";
-    })
-    .join("");
-}
-
-function nextDigit(current: number, increasing: boolean) {
-  return (current + (increasing ? 1 : -1) + 10) % 10;
-}
-
-function buildDirectDigitTransitions(startText: string, targetText: string, versionBase: number) {
-  const transitions: FlipTransition[] = [];
-  let delaySteps = 0;
-
-  for (let index = targetText.length - 1; index >= 0; index -= 1) {
-    const targetChar = targetText[index];
-    if (!isFlipDigit(targetChar) || startText[index] === targetChar) continue;
-
-    transitions.push({
-      delayMs: delaySteps * INITIAL_FLAP_STEP_MS,
-      from: startText[index],
-      index,
-      to: targetChar,
-      version: versionBase + transitions.length,
-    });
-    delaySteps += 1;
-  }
-
-  return transitions;
-}
-
-function buildCounterTransitions(
-  startText: string,
-  targetText: string,
-  increasing: boolean,
-  versionBase: number,
-) {
-  const transitions: FlipTransition[] = [];
-  const startUnits = parseDisplayUnits(startText);
-  const targetUnits = parseDisplayUnits(targetText);
-
-  if (
-    startUnits == null ||
-    targetUnits == null ||
-    !hasSameStaticLayout(startText, targetText)
-  ) {
-    return buildDirectDigitTransitions(startText, targetText, versionBase);
-  }
-
-  const stepCount = Math.abs(targetUnits - startUnits);
-  const digitIndexes = startText
-    .split("")
-    .map((char, index) => (isFlipDigit(char) ? index : -1))
-    .filter((index) => index >= 0);
-
-  if (stepCount > MAX_COUNTER_STEPS || digitIndexes.length === 0) {
-    return buildDirectDigitTransitions(startText, targetText, versionBase);
-  }
-
-  const workingChars = startText.split("");
-  for (let step = 0; step < stepCount; step += 1) {
-    const delayMs = step * FLAP_STEP_MS;
-
-    for (let digitCursor = digitIndexes.length - 1; digitCursor >= 0; digitCursor -= 1) {
-      const index = digitIndexes[digitCursor];
-      const currentDigit = Number(workingChars[index]);
-      const next = nextDigit(currentDigit, increasing);
-      const wrapped = increasing
-        ? currentDigit === 9 && next === 0
-        : currentDigit === 0 && next === 9;
-
-      transitions.push({
-        delayMs,
-        from: String(currentDigit),
-        index,
-        to: String(next),
-        version: versionBase + transitions.length,
-      });
-
-      workingChars[index] = String(next);
-      if (!wrapped) break;
+function extractDomainPrefix(url: string): string {
+  try {
+    const hostname = new URL(url).hostname;
+    const parts = hostname.split(".");
+    if (parts.length >= 3 && parts[0] !== "www") {
+      return parts[0];
     }
+    if (parts.length >= 2) {
+      return parts[parts.length - 2];
+    }
+    return hostname;
+  } catch {
+    return "未配置";
   }
+}
 
-  return transitions;
+function getSiteDisplayName(site: SiteConfig): string {
+  if (site.displayName.trim()) return site.displayName.trim();
+  if (site.endpointUrl) return extractDomainPrefix(site.endpointUrl);
+  return "未配置";
+}
+
+function SiteFlapBalance({ value }: { value: number | null }) {
+  const text = formatBalance(value);
+  const chars = text.split("");
+  const scale = getSiteFlapScale(chars.length);
+
+  return (
+    <div
+      className="site-flap-machine"
+      style={{ "--flap-scale": scale } as CSSProperties}
+    >
+      {chars.map((char, index) => {
+        if (!isFlipDigit(char)) {
+          const cls = `flap-static${char === "." ? " decimal" : ""}${char === "-" ? " minus" : ""}`;
+          return (
+            <span key={`static-${index}-${char}`} className={cls}>
+              {char}
+            </span>
+          );
+        }
+        return (
+          <span key={`flap-${index}`} className="flap-card">
+            <span className="flap-half flap-top current">
+              <span className="flap-glyph">{char}</span>
+            </span>
+            <span className="flap-half flap-bottom current">
+              <span className="flap-glyph">{char}</span>
+            </span>
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 function BalanceWindow() {
   const text = UI_TEXT[detectUiLocale()];
-  const [balanceText, setBalanceText] = useState(formatBalance(null));
-  const [displayText, setDisplayText] = useState(formatBalance(null));
-  const [activeFlips, setActiveFlips] = useState<Record<number, ActiveFlip>>({});
-  const [queryStatus, setQueryStatus] = useState<"loading" | "error" | "ready">("loading");
-  const [errorMsg, setErrorMsg] = useState("");
-  const [copied, setCopied] = useState(false);
-  const displayTextRef = useRef(formatBalance(null));
-  const flipTimersRef = useRef<number[]>([]);
-  const flipVersionRef = useRef(0);
-  const windowWidthRef = useRef(0);
-  const refreshIntervalMs = useRef(DEFAULT_REFRESH_INTERVAL_MS);
+  const [sites, setSites] = useState<SiteConfig[]>([]);
+  const [balances, setBalances] = useState<Record<string, SiteBalanceSnapshot>>({});
+  const [deleteConfirm, setDeleteConfirm] = useState<AnchoredConfirmState | null>(null);
   const promptedSetupRef = useRef(false);
+  const timersRef = useRef<Record<string, number>>({});
 
-  const clearFlipTimers = useCallback(() => {
-    for (const timer of flipTimersRef.current) {
-      window.clearTimeout(timer);
-    }
-    flipTimersRef.current = [];
+  const loadSites = useCallback(async () => {
+    const config = await runCommand<ClientConfig>("load_config");
+    const sorted = [...config.sites].sort((a, b) => a.sortOrder - b.sortOrder);
+    setSites(sorted);
+    return config;
   }, []);
 
-  const showSettings = useCallback(async () => {
-    await runCommand("show_settings_window").catch(() => undefined);
-  }, []);
-
-  const showContextMenu = useCallback((event: React.MouseEvent<HTMLElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-
-    runCommand("show_balance_context_menu", {
-      x: event.clientX,
-      y: event.clientY,
-    }).catch(() => undefined);
-  }, []);
-
-  const animateBalance = useCallback(
-    (nextText: string) => {
-      clearFlipTimers();
-      setActiveFlips({});
-
-      const previousText = displayTextRef.current;
-      const previousValue = parseDisplayNumber(previousText);
-      const nextValue = parseDisplayNumber(nextText);
-      const shouldAnimateDecrease =
-        previousValue != null && nextValue != null && nextValue < previousValue;
-
-      if (!shouldAnimateDecrease) {
-        displayTextRef.current = nextText;
-        setDisplayText(nextText);
-        return;
-      }
-
-      const startText = alignStartText(previousText, nextText, false);
-      const versionBase = (flipVersionRef.current += 1000);
-      const transitions = buildCounterTransitions(startText, nextText, false, versionBase);
-
-      displayTextRef.current = startText;
-      setDisplayText(startText);
-
-      if (transitions.length === 0) {
-        displayTextRef.current = nextText;
-        setDisplayText(nextText);
-        return;
-      }
-
-      const workingChars = startText.split("");
-      for (const transition of transitions) {
-        const startTimer = window.setTimeout(() => {
-          setActiveFlips((flips) => ({
-            ...flips,
-            [transition.index]: {
-              from: transition.from,
-              to: transition.to,
-              version: transition.version,
-            },
-          }));
-        }, transition.delayMs);
-
-        const endTimer = window.setTimeout(() => {
-          workingChars[transition.index] = transition.to;
-          const updatedText = workingChars.join("");
-          displayTextRef.current = updatedText;
-          setDisplayText(updatedText);
-          setActiveFlips((flips) => {
-            if (flips[transition.index]?.version !== transition.version) {
-              return flips;
-            }
-            const nextFlips = { ...flips };
-            delete nextFlips[transition.index];
-            return nextFlips;
-          });
-        }, transition.delayMs + FLAP_DURATION_MS);
-
-        flipTimersRef.current.push(startTimer, endTimer);
-      }
-
-      const finalDelay =
-        Math.max(...transitions.map((transition) => transition.delayMs)) +
-        FLAP_DURATION_MS +
-        30;
-      const finalTimer = window.setTimeout(() => {
-        displayTextRef.current = nextText;
-        setDisplayText(nextText);
-        setActiveFlips({});
-      }, finalDelay);
-      flipTimersRef.current.push(finalTimer);
-    },
-    [clearFlipTimers],
-  );
-
-  const refresh = useCallback(async () => {
+  const refreshSite = useCallback(async (siteId: string) => {
     try {
-      const snapshot = await runCommand<BalanceSnapshot>("query_balance");
-
-      if (!snapshot.configured) {
-        if (!promptedSetupRef.current) {
-          promptedSetupRef.current = true;
-          await showSettings();
-        }
-        return;
-      }
-
-      const nextText = formatBalance(snapshot.remaining);
-      setBalanceText(nextText);
-      animateBalance(nextText);
-      setQueryStatus("ready");
-      setErrorMsg("");
-    } catch {
-      // 静默处理错误
+      const snapshot = await runCommand<BalanceSnapshot>("query_site_balance", { siteId });
+      setBalances((prev) => ({ ...prev, [siteId]: { ...snapshot, siteId } }));
+    } catch (err) {
+      setBalances((prev) => ({
+        ...prev,
+        [siteId]: {
+          siteId,
+          configured: true,
+          remaining: null,
+          refreshedAtMs: Date.now(),
+          error: err instanceof Error ? err.message : String(err),
+        },
+      }));
     }
-  }, [animateBalance, showSettings]);
+  }, []);
 
   useEffect(() => {
     let mounted = true;
-
-    async function bootstrap() {
-      const loaded = await runCommand<ClientConfig>("load_config");
+    (async () => {
+      const config = await loadSites();
       if (!mounted) return;
 
-      if (!loaded.hasAccessToken || !loaded.endpointUrl || !loaded.userId) {
+      const configuredSites = config.sites.filter(
+        (s) => s.endpointUrl && s.hasAccessToken && s.userId,
+      );
+
+      if (configuredSites.length === 0 && !promptedSetupRef.current) {
         promptedSetupRef.current = true;
-        setQueryStatus("error");
-        setErrorMsg(text.setupRequired);
-        await showSettings();
+        await runCommand("show_settings_window");
         return;
       }
-      refreshIntervalMs.current = (loaded.refreshIntervalSecs || 60) * 1000;
 
-      setQueryStatus("loading");
-      try {
-        const snapshot = await runCommand<BalanceSnapshot>("query_balance");
-        if (!mounted) return;
-
-        if (!snapshot.configured) {
-          promptedSetupRef.current = true;
-          setQueryStatus("error");
-          setErrorMsg(text.setupRequired);
-          await showSettings();
-          return;
-        }
-
-        const nextText = formatBalance(snapshot.remaining);
-        setBalanceText(nextText);
-        animateBalance(nextText);
-        setQueryStatus("ready");
-        setErrorMsg("");
-      } catch (err) {
-        if (mounted) {
-          setQueryStatus("error");
-          const msg = err instanceof Error ? err.message : String(err || text.unknownError);
-          setErrorMsg(msg);
-        }
+      for (const site of configuredSites) {
+        refreshSite(site.id);
       }
+    })();
+    return () => { mounted = false; };
+  }, [loadSites, refreshSite]);
+
+  useEffect(() => {
+    for (const timer of Object.values(timersRef.current)) {
+      window.clearInterval(timer);
     }
+    timersRef.current = {};
 
-    bootstrap().catch(() => undefined);
-
+    for (const site of sites) {
+      if (!site.endpointUrl || !site.hasAccessToken || !site.userId) continue;
+      const intervalMs = (site.refreshIntervalSecs || 60) * 1000;
+      timersRef.current[site.id] = window.setInterval(() => refreshSite(site.id), intervalMs);
+    }
     return () => {
-      mounted = false;
-    };
-  }, [refresh, showSettings]);
-
-  useEffect(() => {
-    const timer = window.setInterval(refresh, refreshIntervalMs.current);
-    return () => window.clearInterval(timer);
-  }, [refresh]);
-
-  useEffect(() => clearFlipTimers, [clearFlipTimers]);
-
-  useEffect(() => {
-    if (!isTauriRuntime()) return;
-
-    const width = measureBalanceWindowWidth(balanceText);
-    if (windowWidthRef.current === width) return;
-    windowWidthRef.current = width;
-    runCommand("resize_main_window", { width }).catch(() => undefined);
-  }, [balanceText]);
-
-  useEffect(() => {
-    if (!isTauriRuntime()) return;
-
-    let unlisten: (() => void) | undefined;
-    listen<ClientConfig>("config-saved", async (event) => {
-      promptedSetupRef.current = false;
-      setQueryStatus("loading");
-      setErrorMsg("");
-      if (event.payload?.refreshIntervalSecs) {
-        refreshIntervalMs.current = event.payload.refreshIntervalSecs * 1000;
+      for (const timer of Object.values(timersRef.current)) {
+        window.clearInterval(timer);
       }
-      const win = getCurrentWindow();
-      await win.show().catch(() => undefined);
-      await win.setFocus().catch(() => undefined);
-      await refresh();
-    })
-      .then((handler) => {
-        unlisten = handler;
-      })
-      .catch(() => undefined);
-
-    return () => {
-      unlisten?.();
+      timersRef.current = {};
     };
-  }, [refresh]);
+  }, [sites, refreshSite]);
 
-  const balanceChars = displayText.split("");
-  const flapScale = Math.max(0.82, Math.min(1, 13 / Math.max(balanceChars.length, 1)));
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | undefined;
+    listen<ClientConfig>("config-saved", async () => {
+      promptedSetupRef.current = false;
+      await loadSites();
+    }).then((h) => { unlisten = h; }).catch(() => undefined);
+    return () => { unlisten?.(); };
+  }, [loadSites]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+
+    const showTrayMenu = (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      runCommand("show_balance_context_menu", {
+        x: event.clientX,
+        y: event.clientY,
+      }).catch(() => undefined);
+    };
+
+    document.addEventListener("contextmenu", showTrayMenu, { capture: true });
+    return () => {
+      document.removeEventListener("contextmenu", showTrayMenu, { capture: true });
+    };
+  }, []);
+
+  const siteCount = sites.length;
+  const showSortControls = siteCount > 1;
+  const windowWidth = Math.max(
+    MAIN_WINDOW_MIN_WIDTH,
+    ...sites.map((site) => {
+      const balance = balances[site.id];
+      const isConfigured = site.endpointUrl && site.hasAccessToken && site.userId;
+      const balanceText =
+        isConfigured && !balance?.error ? formatBalance(balance?.remaining ?? null) : "--";
+      return measureBalanceWindowWidth(balanceText);
+    }),
+  );
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    runCommand("resize_main_window", {
+      width: windowWidth,
+    }).catch(() => undefined);
+  }, [windowWidth]);
+
+  const handleAddSite = useCallback(async () => {
+    await runCommand("show_settings_window", { newSite: true });
+  }, []);
+
+  const handleEditSite = useCallback(async (siteId: string) => {
+    await runCommand("show_settings_window", { editSiteId: siteId });
+  }, []);
+
+  const requestDeleteSite = useCallback((siteId: string) => {
+    const site = sites.find((s) => s.id === siteId);
+    if (!site) return;
+    const name = getSiteDisplayName(site);
+    setDeleteConfirm({
+      siteId,
+      title: "删除站点",
+      message: `「${name}」将从余额窗移除。`,
+      confirmLabel: "删除",
+      cancelLabel: "取消",
+      danger: true,
+    });
+  }, [sites]);
+
+  const confirmDeleteSite = useCallback(async () => {
+    if (!deleteConfirm) return;
+    await runCommand("delete_site", { siteId: deleteConfirm.siteId });
+    setDeleteConfirm(null);
+    await loadSites();
+  }, [deleteConfirm, loadSites]);
+
+  const cancelDeleteSite = useCallback(() => {
+    setDeleteConfirm(null);
+  }, []);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    runCommand("show_balance_context_menu", {
+      x: e.clientX,
+      y: e.clientY,
+    }).catch(() => undefined);
+  }, []);
+
+  const handleWindowMouseDown = useCallback((e: React.MouseEvent<HTMLElement>) => {
+    if (e.button !== 0 || !isTauriRuntime()) return;
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest("button, input, [data-window-no-drag]")) return;
+    getCurrentWindow().startDragging().catch(() => undefined);
+  }, []);
+
+  const moveSite = useCallback(async (index: number, direction: -1 | 1) => {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= sites.length) return;
+    const reordered = [...sites];
+    const [moved] = reordered.splice(index, 1);
+    reordered.splice(targetIndex, 0, moved);
+    const siteIds = reordered.map((s) => s.id);
+    await runCommand("update_site_orders", { siteIds });
+    setDeleteConfirm(null);
+    await loadSites();
+  }, [sites, loadSites]);
 
   return (
-    <main
-      className="shell main-shell"
-      onContextMenu={showContextMenu}
-      onDoubleClick={showSettings}
-    >
-      <div className="orb-window">
-        <button
-          className={`icon-button settings-btn${queryStatus !== "ready" ? " always-visible" : ""}`}
-          type="button"
-          title={text.settings}
-          onClick={showSettings}
-        >
-          <Settings size={14} />
-        </button>
-        <div className="balance-number">
-          {queryStatus === "loading" ? (
-            <div className="loading-indicator">{text.loading}</div>
-          ) : (
-            <div
-              className="flap-machine"
-              aria-label={`${text.balanceAriaLabel} ${balanceText}`}
-              style={{ "--flap-scale": flapScale } as CSSProperties}
-            >
-              {balanceChars.map((char, index) => {
-                if (!isFlipDigit(char)) {
-                  const staticClassName = `flap-static${char === "," ? " separator" : ""}${
-                    char === "." ? " decimal" : ""
-                  }${char === "-" ? " minus" : ""}`;
-                  return (
-                    <span key={`static-${index}-${char}`} className={staticClassName}>
-                      {char}
-                    </span>
-                  );
-                }
+    <main className="shell main-shell">
+      <div
+        className="orb-window multi-site"
+        onContextMenu={handleContextMenu}
+        onMouseDown={handleWindowMouseDown}
+      >
+        <div className="site-list">
+          {sites.map((site, index) => {
+            const balance = balances[site.id];
+            const isConfigured = site.endpointUrl && site.hasAccessToken && site.userId;
+            const displayName = getSiteDisplayName(site);
+            const isLoading = isConfigured && !balance;
+            const hasError = balance?.error;
+            const isLastSite = index === siteCount - 1;
 
-                const activeFlip = activeFlips[index];
-                const topChar = activeFlip?.to || char;
-                const bottomChar = activeFlip?.from || char;
-                const flapStyle = {
-                  "--flap-duration": `${FLAP_DURATION_MS}ms`,
-                } as CSSProperties;
-
-                return (
-                  <span
-                    key={`flap-${index}`}
-                    className={`flap-card${activeFlip ? " is-flipping" : ""}`}
-                    style={flapStyle}
-                    aria-hidden="true"
-                  >
-                    <span className="flap-half flap-top current">
-                      <span className="flap-glyph">{topChar}</span>
-                    </span>
-                    <span className="flap-half flap-bottom current">
-                      <span className="flap-glyph">{bottomChar}</span>
-                    </span>
-                    {activeFlip && (
-                      <>
-                        <span
-                          key={`old-${activeFlip.version}`}
-                          className="flap-half flap-top old"
-                        >
-                          <span className="flap-glyph">{activeFlip.from}</span>
-                        </span>
-                        <span
-                          key={`next-${activeFlip.version}`}
-                          className="flap-half flap-bottom next"
-                        >
-                          <span className="flap-glyph">{activeFlip.to}</span>
-                        </span>
-                      </>
+            return (
+              <div
+                key={site.id}
+                className={`site-block${hasError ? " has-error" : ""}`}
+                onContextMenu={handleContextMenu}
+              >
+                {(showSortControls || isLastSite) && (
+                  <div className="site-left-controls" data-window-no-drag>
+                    {showSortControls && (
+                      <button
+                        className="site-control-btn"
+                        type="button"
+                        title="上移"
+                        aria-label="上移"
+                        disabled={index === 0}
+                        onClick={(e) => { e.stopPropagation(); moveSite(index, -1); }}
+                      >
+                        <ChevronUp size={10} strokeWidth={2.4} />
+                      </button>
                     )}
-                  </span>
-                );
-              })}
-            </div>
-          )}
+                    {isLastSite && (
+                      <button
+                        className="site-control-btn site-add-btn"
+                        type="button"
+                        title="新增站点"
+                        aria-label="新增站点"
+                        onClick={(e) => { e.stopPropagation(); handleAddSite(); }}
+                      >
+                        <Plus size={11} strokeWidth={2.5} />
+                      </button>
+                    )}
+                    {showSortControls && (
+                      <button
+                        className="site-control-btn"
+                        type="button"
+                        title="下移"
+                        aria-label="下移"
+                        disabled={index === siteCount - 1}
+                        onClick={(e) => { e.stopPropagation(); moveSite(index, 1); }}
+                      >
+                        <ChevronDown size={10} strokeWidth={2.4} />
+                      </button>
+                    )}
+                  </div>
+                )}
+                <span className="site-name" title={displayName}>
+                  {displayName}
+                </span>
+                <div className="site-actions">
+                  <button
+                    className="site-action-btn site-edit-btn"
+                    type="button"
+                    title={text.settings}
+                    aria-label={text.settings}
+                    onClick={(e) => { e.stopPropagation(); handleEditSite(site.id); }}
+                  >
+                    <Settings size={10} strokeWidth={2.3} />
+                  </button>
+                  <button
+                    className="site-action-btn site-delete-btn"
+                    type="button"
+                    title="删除"
+                    aria-label="删除"
+                    onClick={(e) => { e.stopPropagation(); requestDeleteSite(site.id); }}
+                  >
+                    <Trash2 size={10} strokeWidth={2.3} />
+                  </button>
+                </div>
+                <div className="site-balance">
+                  {isLoading ? (
+                    <span className="site-loading">{text.loading}</span>
+                  ) : !isConfigured ? (
+                    <span className="site-unconfigured">--</span>
+                  ) : hasError ? (
+                    <span className="site-error" title={balance.error || ""}>
+                      ERR
+                    </span>
+                  ) : (
+                    <SiteFlapBalance value={balance?.remaining ?? null} />
+                  )}
+                </div>
+                {deleteConfirm?.siteId === site.id && (
+                  <InlineConfirmDialog
+                    {...deleteConfirm}
+                    onConfirm={confirmDeleteSite}
+                    onCancel={cancelDeleteSite}
+                  />
+                )}
+              </div>
+            );
+          })}
         </div>
-        {queryStatus === "error" && errorMsg && (
-          <div
-            className="error-line"
-            title={text.copyErrorTitle}
-            onClick={() => {
-              navigator.clipboard.writeText(errorMsg).then(() => {
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1500);
-              }).catch(() => undefined);
-            }}
-          >
-            {copied ? `✓ ${text.copied}` : errorMsg}
-          </div>
-        )}
       </div>
     </main>
   );
@@ -670,9 +739,10 @@ function BalanceWindow() {
 
 function SettingsWindow() {
   const text = UI_TEXT[detectUiLocale()];
-  const [config, setConfig] = useState<ClientConfig>({ hasAccessToken: false, refreshIntervalSecs: 60, autostartEnabled: true });
-  const [accessToken, setAccessToken] = useState("");
+  const { options: confirmOptions, confirm, handleConfirm, handleCancel } = useConfirmDialog();
+  const [displayName, setDisplayName] = useState("");
   const [endpointUrl, setEndpointUrl] = useState("");
+  const [accessToken, setAccessToken] = useState("");
   const [userId, setUserId] = useState("");
   const [refreshIntervalSecs, setRefreshIntervalSecs] = useState("60");
   const [autostartEnabled, setAutostartEnabled] = useState(true);
@@ -680,85 +750,152 @@ function SettingsWindow() {
   const [error, setError] = useState("");
   const [setupHint, setSetupHint] = useState("");
   const [appVersion, setAppVersion] = useState("");
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const originalFormRef = useRef("");
+  const editingSiteIdRef = useRef<string | null>(null);
+  const isDraftRef = useRef(false);
+
+  const snapshotForm = useCallback(() => {
+    return JSON.stringify({ displayName, endpointUrl, accessToken, userId, refreshIntervalSecs });
+  }, [displayName, endpointUrl, accessToken, userId, refreshIntervalSecs]);
+
+  useEffect(() => {
+    setHasUnsavedChanges(snapshotForm() !== originalFormRef.current);
+  }, [snapshotForm]);
+
+  function loadSiteIntoForm(site: SiteConfig) {
+    editingSiteIdRef.current = site.id;
+    isDraftRef.current = false;
+    setDisplayName(site.displayName);
+    setEndpointUrl(site.endpointUrl);
+    setAccessToken(site.accessToken);
+    setUserId(site.userId);
+    setRefreshIntervalSecs(String(site.refreshIntervalSecs));
+    setSaveStatus("idle");
+    setError("");
+    setTimeout(() => {
+      originalFormRef.current = JSON.stringify({
+        displayName: site.displayName, endpointUrl: site.endpointUrl,
+        accessToken: site.accessToken, userId: site.userId,
+        refreshIntervalSecs: String(site.refreshIntervalSecs),
+      });
+    }, 0);
+  }
+
+  function loadEmptyDraft() {
+    editingSiteIdRef.current = null;
+    isDraftRef.current = true;
+    setDisplayName("");
+    setEndpointUrl("");
+    setAccessToken("");
+    setUserId("");
+    setRefreshIntervalSecs("60");
+    setSaveStatus("idle");
+    setError("");
+    originalFormRef.current = JSON.stringify({
+      displayName: "", endpointUrl: "", accessToken: "", userId: "", refreshIntervalSecs: "60",
+    });
+  }
+
+  const loadFormFromConfig = useCallback(async () => {
+    const config = await runCommand<ClientConfig>("load_config");
+    setAutostartEnabled(config.autostartEnabled);
+    const sorted = [...config.sites].sort((a, b) => a.sortOrder - b.sortOrder);
+    if (sorted.length > 0) {
+      loadSiteIntoForm(sorted[0]);
+    } else {
+      loadEmptyDraft();
+    }
+  }, []);
 
   useEffect(() => {
     let mounted = true;
-
-    runCommand<ClientConfig>("load_config")
-      .then((loaded) => {
-        if (!mounted) return;
-        setConfig(loaded);
-        setEndpointUrl(loaded.endpointUrl || "");
-        setAccessToken(loaded.accessToken || "");
-        setUserId(loaded.userId || "");
-        setRefreshIntervalSecs(String(loaded.refreshIntervalSecs || 60));
-        setAutostartEnabled(loaded.autostartEnabled ?? true);
-      })
-      .catch((err) => {
-        if (!mounted) return;
-        setSaveStatus("error");
-        setError(err instanceof Error ? err.message : String(err));
-      });
-
-    return () => {
-      mounted = false;
-    };
-  }, []);
+    (async () => {
+      await loadFormFromConfig();
+      if (!mounted) return;
+    })();
+    return () => { mounted = false; };
+  }, [loadFormFromConfig]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
-
     let unlisten: (() => void) | undefined;
     listen<string>("setup-required", (event) => {
       setSetupHint(event.payload);
-      // 3 秒后自动消失
       setTimeout(() => setSetupHint(""), 3000);
-    })
-      .then((handler) => {
-        unlisten = handler;
-      })
-      .catch(() => undefined);
-
-    return () => {
-      unlisten?.();
-    };
+    }).then((h) => { unlisten = h; }).catch(() => undefined);
+    return () => { unlisten?.(); };
   }, []);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
-
-    getVersion()
-      .then((version) => {
-        setAppVersion(version);
-      })
-      .catch(() => undefined);
+    let unlisten: (() => void) | undefined;
+    listen("new-site", () => {
+      loadEmptyDraft();
+    }).then((h) => { unlisten = h; }).catch(() => undefined);
+    return () => { unlisten?.(); };
   }, []);
 
-  async function saveSettings() {
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | undefined;
+    listen<string>("edit-site", async (event) => {
+      const config = await runCommand<ClientConfig>("load_config");
+      setAutostartEnabled(config.autostartEnabled);
+      const site = config.sites.find((s) => s.id === event.payload);
+      if (site) {
+        loadSiteIntoForm(site);
+      }
+    }).then((h) => { unlisten = h; }).catch(() => undefined);
+    return () => { unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | undefined;
+    listen("refresh-form", () => {
+      loadFormFromConfig();
+    }).then((h) => { unlisten = h; }).catch(() => undefined);
+    return () => { unlisten?.(); };
+  }, [loadFormFromConfig]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    getVersion().then((v) => setAppVersion(v)).catch(() => undefined);
+  }, []);
+
+  async function handleSave() {
     setSaveStatus("saving");
     setError("");
-
     try {
       const interval = Math.max(10, Math.min(3600, parseInt(refreshIntervalSecs) || 60));
-      const saved = await runCommand<ClientConfig>("save_config", {
+      await runCommand<ClientConfig>("save_site_config", {
+        siteId: isDraftRef.current ? undefined : editingSiteIdRef.current,
+        displayName: displayName.trim(),
         endpointUrl: endpointUrl.trim(),
         accessToken: accessToken.trim() || undefined,
         userId: userId.trim(),
         refreshIntervalSecs: interval,
-        autostartEnabled,
       });
-      setConfig(saved);
-      setAccessToken(saved.accessToken || "");
-      setRefreshIntervalSecs(String(saved.refreshIntervalSecs));
-      setAutostartEnabled(saved.autostartEnabled);
       setSaveStatus("saved");
-
-      // 保存成功后关闭设置窗口
+      setHasUnsavedChanges(false);
       await hideWindow();
     } catch (err) {
       setSaveStatus("error");
       setError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  async function handleClose() {
+    if (hasUnsavedChanges) {
+      const discard = await confirm({
+        title: "放弃修改",
+        message: "当前表单有未保存内容。",
+        confirmLabel: "放弃修改",
+      });
+      if (!discard) return;
+    }
+    hideWindow();
   }
 
   return (
@@ -771,129 +908,75 @@ function SettingsWindow() {
           </div>
           <div className="settings-topbar-actions" data-window-no-drag>
             <div className="guide-trigger">
-              <button
-                className="icon-button"
-                type="button"
-                title={text.formGuideAlt}
-                aria-label={text.formGuideAlt}
-              >
+              <button className="icon-button" type="button" title={text.formGuideAlt} aria-label={text.formGuideAlt}>
                 <CircleQuestionMark size={15} />
               </button>
               <figure className="settings-guide-popover">
                 <img src={formGuideImage} alt={text.formGuideAlt} />
               </figure>
             </div>
-            <button
-              className="icon-button close"
-              type="button"
-              title={text.hideSettings}
-              onClick={hideWindow}
-            >
+            <button className="icon-button close" type="button" title={text.hideSettings} onClick={handleClose}>
               <X size={15} />
             </button>
           </div>
         </header>
-
         <div className="settings-body">
           {setupHint && <div className="setup-hint">{setupHint}</div>}
-
+          <label className="settings-field" htmlFor="display-name">
+            <span>显示名称</span>
+            <input id="display-name" data-window-no-drag value={displayName}
+              placeholder={endpointUrl ? extractDomainPrefix(endpointUrl) : "自动使用域名前缀"}
+              onChange={(e) => { setDisplayName(e.currentTarget.value); setSaveStatus("idle"); }} />
+          </label>
           <label className="settings-field" htmlFor="endpoint-url">
             <span>{text.endpointUrl}</span>
-            <input
-              id="endpoint-url"
-              data-window-no-drag
-              value={endpointUrl}
-              placeholder="https://example.com"
-              onChange={(event) => {
-                setEndpointUrl(event.currentTarget.value);
-                setSaveStatus("idle");
-              }}
-            />
+            <input id="endpoint-url" data-window-no-drag value={endpointUrl} placeholder="https://example.com"
+              onChange={(e) => { setEndpointUrl(e.currentTarget.value); setSaveStatus("idle"); }} />
           </label>
-
           <label className="settings-field" htmlFor="access-token">
             <span>{text.accessToken}</span>
-            <input
-              id="access-token"
-              data-window-no-drag
-              value={accessToken}
-              placeholder={config.hasAccessToken ? text.accessTokenSavedPlaceholder : text.accessToken}
-              onChange={(event) => {
-                setAccessToken(event.currentTarget.value);
-                setSaveStatus("idle");
-              }}
-            />
+            <input id="access-token" data-window-no-drag value={accessToken}
+              placeholder={text.accessToken}
+              onChange={(e) => { setAccessToken(e.currentTarget.value); setSaveStatus("idle"); }} />
           </label>
-
           <label className="settings-field" htmlFor="user-id">
             <span>{text.userId}</span>
-            <input
-              id="user-id"
-              data-window-no-drag
-              value={userId}
-              placeholder="User ID"
-              onChange={(event) => {
-                setUserId(event.currentTarget.value);
-                setSaveStatus("idle");
-              }}
-            />
+            <input id="user-id" data-window-no-drag value={userId} placeholder="User ID"
+              onChange={(e) => { setUserId(e.currentTarget.value); setSaveStatus("idle"); }} />
           </label>
-
           <label className="settings-field" htmlFor="refresh-interval">
             <span>{text.refreshInterval}</span>
-            <input
-              id="refresh-interval"
-              type="number"
-              data-window-no-drag
-              value={refreshIntervalSecs}
-              placeholder="60"
-              min={10}
-              max={3600}
-              onChange={(event) => {
-                setRefreshIntervalSecs(event.currentTarget.value);
-                setSaveStatus("idle");
-              }}
-            />
+            <input id="refresh-interval" type="number" data-window-no-drag value={refreshIntervalSecs}
+              placeholder="60" min={10} max={3600}
+              onChange={(e) => { setRefreshIntervalSecs(e.currentTarget.value); setSaveStatus("idle"); }} />
           </label>
-
           <label className="settings-field settings-field-toggle" htmlFor="autostart">
             <span>{text.autostart}</span>
-            <input
-              id="autostart"
-              type="checkbox"
-              data-window-no-drag
-              checked={autostartEnabled}
-              onChange={(event) => {
-                setAutostartEnabled(event.currentTarget.checked);
-                setSaveStatus("idle");
-              }}
-            />
+            <input id="autostart" type="checkbox" data-window-no-drag checked={autostartEnabled}
+              onChange={(e) => { setAutostartEnabled(e.currentTarget.checked); setSaveStatus("idle"); }} />
           </label>
-
-          {error && <div className="settings-error">{error}</div>}
-
+          <div className={`settings-error${error ? "" : " is-empty"}`} title={error} aria-live="polite">
+            {error}
+          </div>
           <div className="settings-actions">
-            <button className="secondary-button" type="button" onClick={hideWindow}>
+            <button className="secondary-button" type="button" onClick={handleClose}>
               <span>{text.hide}</span>
             </button>
-            <button
-              className="save-button"
-              type="button"
-              onClick={saveSettings}
-              disabled={saveStatus === "saving"}
-            >
+            <button className="save-button" type="button" onClick={handleSave} disabled={saveStatus === "saving"}>
               <Save size={14} />
               <span>{saveStatus === "saving" ? text.saving : text.save}</span>
             </button>
           </div>
-
-          {appVersion && (
-            <div className="settings-version">
-              v{appVersion}
-            </div>
-          )}
+          {appVersion && (<div className="settings-version">v{appVersion}</div>)}
         </div>
       </section>
+      {confirmOptions && (
+        <ConfirmDialog
+          {...confirmOptions}
+          onConfirm={handleConfirm}
+          onCancel={handleCancel}
+        />
+      )}
     </main>
   );
 }

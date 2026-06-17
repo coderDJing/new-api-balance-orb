@@ -5,10 +5,8 @@
   <strong>English</strong>
 </p>
 
-New API Balance Orb is a frameless Windows Tauri desktop widget for
-checking a New API style account balance endpoint. It polls once per minute,
-shows only the numeric remaining balance, and keeps tray commands for showing
-the widget, opening settings, checking updates, and exiting.
+New API Balance Orb is a frameless Windows Tauri desktop widget for tracking
+multiple New API compatible account balances in one compact window.
 
 <p align="center">
   <img src="./docs/assets/balance-window.gif" alt="New API Balance Orb balance window demo" width="280">
@@ -24,30 +22,25 @@ cost accounting, and organization-level access control.
 This widget is designed to work with New API deployments. To use it, you need a
 running New API instance with a valid account.
 
-## Runtime Behavior
-
-- The tray menu includes Settings, Check for updates, Project site, and Quit.
-- Simplified Chinese system locales show Simplified Chinese text. Other locales
-  show English text.
-- Windows release uninstall removes this app's startup registry entries from
-  both `Run` and `StartupApproved\Run`.
-
-## Credentials
+## Multi-site Balances
 
 Credentials and provider endpoints are not stored in this repository.
 
-Open Settings from the tray menu or the widget title bar, then enter:
+Configure one or more New API compatible sites. Each site can have its own:
 
+- Display name, or leave it empty to use the endpoint domain prefix
 - API endpoint, for example a `GET /api/user/self` compatible endpoint
 - Access Token from the provider security settings
 - User ID from the provider account
+- Refresh interval in seconds
 
 <p align="center">
   <img src="./docs/assets/form-guide.png" alt="New API form guide" width="720">
 </p>
 
 The app saves those values in the local Tauri app config directory on this
-machine.
+machine. Older single-site config files are migrated into the current multi-site
+format automatically.
 
 ## Auto Update
 

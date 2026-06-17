@@ -2341,7 +2341,7 @@ dependencies = [
 
 [[package]]
 name = "new-api-balance-orb"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "ctrlc",
  "log",
@@ -3086,7 +3086,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
