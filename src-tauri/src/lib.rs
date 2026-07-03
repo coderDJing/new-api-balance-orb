@@ -29,6 +29,8 @@ const MAIN_WINDOW_HEIGHT: f64 = 148.0;
 const MAIN_WINDOW_ROW_HEIGHT: f64 = 106.0;
 const MAIN_WINDOW_VERTICAL_PADDING: f64 = 42.0;
 const MAIN_WINDOW_MARGIN: f64 = 20.0;
+const MAIN_WINDOW_MIN_VISIBLE_OVERLAP: i64 = 48;
+const MAIN_WINDOW_VISIBILITY_CHECK_INTERVAL_SECS: u64 = 2;
 const WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
 const WEBVIEW2_CRASH_REPORTER_FEATURE: &str = "msEdgeCrashReporter";
 const WEBVIEW2_SHUTDOWN_FLAGS: [&str; 2] = ["--disable-crash-reporter", "--disable-breakpad"];
@@ -754,6 +756,7 @@ pub fn run() {
             resize_main_window_from_config(app.handle());
             position_main_window(app)?;
             start_fullscreen_monitor(app.handle().clone());
+            start_main_window_visibility_monitor(app.handle().clone());
             spawn_auto_update_check(app.handle().clone());
             sync_autostart(app.handle());
             Ok(())
@@ -1217,6 +1220,9 @@ fn show_main_window(app: &AppHandle) {
     resize_main_window_for_site_count(app, config.map(|config| config.sites.len()).unwrap_or(1));
 
     if let Some(window) = app.get_webview_window("main") {
+        if let Err(err) = ensure_window_visible_on_monitor(&window) {
+            log::warn!("[position] failed to ensure main window visibility before show: {err}");
+        }
         reveal_window(&window);
     }
 }
@@ -1274,6 +1280,50 @@ fn position_window_top_right(window: &WebviewWindow) -> tauri::Result<()> {
         MAIN_WINDOW_MARGIN,
     )))?;
     Ok(())
+}
+
+fn ensure_window_visible_on_monitor(window: &WebviewWindow) -> tauri::Result<()> {
+    if window_has_visible_monitor_overlap(window)? {
+        return Ok(());
+    }
+
+    log::warn!("[position] main window is outside visible monitors; repositioning");
+    position_window_top_right(window)
+}
+
+fn window_has_visible_monitor_overlap(window: &WebviewWindow) -> tauri::Result<bool> {
+    let monitors = window.available_monitors()?;
+    if monitors.is_empty() {
+        return Ok(false);
+    }
+
+    let window_position = window.outer_position()?;
+    let window_size = window.outer_size()?;
+    if window_size.width == 0 || window_size.height == 0 {
+        return Ok(false);
+    }
+
+    let window_left = window_position.x as i64;
+    let window_top = window_position.y as i64;
+    let window_right = window_left + window_size.width as i64;
+    let window_bottom = window_top + window_size.height as i64;
+    let min_visible_width = MAIN_WINDOW_MIN_VISIBLE_OVERLAP.min(window_size.width as i64);
+    let min_visible_height = MAIN_WINDOW_MIN_VISIBLE_OVERLAP.min(window_size.height as i64);
+
+    Ok(monitors.iter().any(|monitor| {
+        let monitor_position = monitor.position();
+        let monitor_size = monitor.size();
+        let monitor_left = monitor_position.x as i64;
+        let monitor_top = monitor_position.y as i64;
+        let monitor_right = monitor_left + monitor_size.width as i64;
+        let monitor_bottom = monitor_top + monitor_size.height as i64;
+        let overlap_width =
+            (window_right.min(monitor_right) - window_left.max(monitor_left)).max(0);
+        let overlap_height =
+            (window_bottom.min(monitor_bottom) - window_top.max(monitor_top)).max(0);
+
+        overlap_width >= min_visible_width && overlap_height >= min_visible_height
+    }))
 }
 
 fn logical_window_width(window: &WebviewWindow) -> f64 {
@@ -1339,11 +1389,28 @@ fn start_fullscreen_monitor(app: AppHandle) {
             } else if *hidden {
                 // 全屏退出，恢复主窗口
                 if let Some(window) = app.get_webview_window("main") {
+                    let _ = ensure_window_visible_on_monitor(&window);
                     let _ = window.show();
                     let _ = window.set_always_on_top(false);
                     let _ = window.set_always_on_top(true);
                 }
                 *hidden = false;
+            }
+        }
+    });
+}
+
+fn start_main_window_visibility_monitor(app: AppHandle) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(
+            MAIN_WINDOW_VISIBILITY_CHECK_INTERVAL_SECS,
+        ));
+
+        if let Some(window) = app.get_webview_window("main") {
+            if window.is_visible().unwrap_or(false) {
+                if let Err(err) = ensure_window_visible_on_monitor(&window) {
+                    log::warn!("[position] failed to keep main window visible: {err}");
+                }
             }
         }
     });

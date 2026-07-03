@@ -2341,7 +2341,7 @@ dependencies = [
 
 [[package]]
 name = "new-api-balance-orb"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "ctrlc",
  "log",
