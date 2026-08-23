@@ -10,8 +10,8 @@ use std::{
 use tauri::{
     menu::{Menu, MenuBuilder},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    App, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Runtime,
-    WebviewWindow, WindowEvent,
+    App, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Position,
+    Runtime, WebviewWindow, WindowEvent,
 };
 #[cfg(not(debug_assertions))]
 use tauri_plugin_autostart::ManagerExt;
@@ -766,6 +766,20 @@ pub fn run() {
                 api.prevent_close();
                 let _ = window.hide();
             }
+
+            // Windows 在切换显示器、DPI 或分辨率时会重新协商 WebView 的物理尺寸。
+            // 用当前缩放系数重新应用逻辑尺寸，避免宿主窗口与 CSS 布局使用不同的尺寸基准。
+            if window.label() == "main" {
+                if let WindowEvent::ScaleFactorChanged { .. } = event {
+                    let app = window.app_handle();
+                    resize_main_window_from_config(&app);
+                    if let Some(main_window) = app.get_webview_window("main") {
+                        if let Err(err) = position_window_top_right(&main_window) {
+                            log::warn!("[position] failed to reposition main window after scale change: {err}");
+                        }
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             load_config,
@@ -1255,7 +1269,7 @@ fn position_main_window(app: &App) -> tauri::Result<()> {
 }
 
 fn position_window_top_right(window: &WebviewWindow) -> tauri::Result<()> {
-    let window_width = logical_window_width(window);
+    let window_size = window.outer_size()?;
 
     let monitor = match window.current_monitor()? {
         Some(monitor) => Some(monitor),
@@ -1266,18 +1280,19 @@ fn position_window_top_right(window: &WebviewWindow) -> tauri::Result<()> {
         let size = monitor.size();
         let position = monitor.position();
         let scale = monitor.scale_factor();
-        let x = position.x as f64 / scale + size.width as f64 / scale
-            - window_width
-            - MAIN_WINDOW_MARGIN;
-        let y = position.y as f64 / scale + MAIN_WINDOW_MARGIN;
-        window.set_position(tauri::Position::Logical(LogicalPosition::new(x, y)))?;
+        let margin = (MAIN_WINDOW_MARGIN * scale).round() as i32;
+        let x = position.x + size.width as i32 - window_size.width as i32 - margin;
+        let y = position.y + margin;
+        // Monitor 的位置和尺寸是物理像素；必须以相同坐标系设置位置。
+        // 混用 LogicalPosition 会在分辨率或 DPI 变化后造成窗口偏移和 WebView 尺寸错配。
+        window.set_position(Position::Physical(PhysicalPosition::new(x, y)))?;
         return Ok(());
     }
 
-    let x = 1920.0 - window_width - MAIN_WINDOW_MARGIN;
-    window.set_position(tauri::Position::Logical(LogicalPosition::new(
+    let x = 1920 - window_size.width as i32 - MAIN_WINDOW_MARGIN as i32;
+    window.set_position(Position::Physical(PhysicalPosition::new(
         x,
-        MAIN_WINDOW_MARGIN,
+        MAIN_WINDOW_MARGIN as i32,
     )))?;
     Ok(())
 }
