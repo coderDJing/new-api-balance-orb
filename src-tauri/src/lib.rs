@@ -773,11 +773,6 @@ pub fn run() {
                 if let WindowEvent::ScaleFactorChanged { .. } = event {
                     let app = window.app_handle();
                     resize_main_window_from_config(&app);
-                    if let Some(main_window) = app.get_webview_window("main") {
-                        if let Err(err) = position_window_top_right(&main_window) {
-                            log::warn!("[position] failed to reposition main window after scale change: {err}");
-                        }
-                    }
                 }
             }
         })
