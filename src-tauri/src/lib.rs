@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 use tauri::{
-    menu::{Menu, MenuBuilder},
+    menu::{CheckMenuItem, Menu, MenuBuilder},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     App, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Position,
     Runtime, WebviewWindow, WindowEvent,
@@ -79,6 +79,13 @@ impl NativeText {
         match self {
             Self::Zh => "退出",
             Self::En => "Quit",
+        }
+    }
+
+    fn autostart(self) -> &'static str {
+        match self {
+            Self::Zh => "开机自启动",
+            Self::En => "Launch at startup",
         }
     }
 
@@ -378,7 +385,6 @@ struct ClientSiteConfig {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ClientConfig {
-    autostart_enabled: bool,
     sites: Vec<ClientSiteConfig>,
 }
 
@@ -715,7 +721,8 @@ fn resize_main_window_from_config(app: &AppHandle) {
 
 #[tauri::command]
 fn show_balance_context_menu(window: WebviewWindow, x: f64, y: f64) -> Result<(), String> {
-    let menu = build_balance_context_menu(&window).map_err(|err| err.to_string())?;
+    let (menu, _autostart_item) =
+        build_app_menu(&window, autostart_enabled(window.app_handle())).map_err(|err| err.to_string())?;
     window
         .popup_menu_at(&menu, Position::Logical(LogicalPosition::new(x, y)))
         .map_err(|err| err.to_string())
@@ -1045,7 +1052,6 @@ fn client_config(config: Option<StoredConfig>) -> ClientConfig {
     });
 
     ClientConfig {
-        autostart_enabled: config.autostart_enabled,
         sites: config
             .sites
             .into_iter()
@@ -1067,18 +1073,20 @@ fn sync_autostart(app: &AppHandle) {
     #[cfg(debug_assertions)]
     {
         let _ = app;
+        // 开发构建不注册系统自启动项，避免把 dev 产物写进开机启动。
+        log::info!("Autostart apply skipped in debug build");
     }
 
     #[cfg(not(debug_assertions))]
     {
         let manager = app.autolaunch();
-        let enabled = read_config(app)
-            .map(|c| c.autostart_enabled)
-            .unwrap_or(true);
-        if enabled {
-            let _ = manager.enable();
+        let result = if autostart_enabled(app) {
+            manager.enable()
         } else {
-            let _ = manager.disable();
+            manager.disable()
+        };
+        if let Err(err) = result {
+            log::warn!("Failed to apply autostart to system: {err}");
         }
     }
 }
@@ -1105,7 +1113,7 @@ fn preview(value: &str) -> String {
 
 fn install_tray(app: &mut App) -> tauri::Result<()> {
     let handle = app.handle();
-    let menu = build_tray_menu(handle)?;
+    let (menu, autostart_item) = build_app_menu(handle, autostart_enabled(handle))?;
 
     let mut tray = TrayIconBuilder::with_id("main")
         .menu(&menu)
@@ -1128,6 +1136,7 @@ fn install_tray(app: &mut App) -> tauri::Result<()> {
     }
 
     app.manage(tray.build(handle)?);
+    app.manage(TrayAutostartItem(autostart_item));
     Ok(())
 }
 
@@ -1137,6 +1146,7 @@ fn handle_menu_action(app: &AppHandle, id: &str) {
         "project_site" => {
             let _ = app.opener().open_url(PROJECT_URL, None::<&str>);
         }
+        "autostart" => toggle_autostart(app),
         "quit" => app.exit(0),
         _ => {}
     }
@@ -1178,32 +1188,78 @@ fn crop_to_content(icon: tauri::image::Image<'_>) -> tauri::image::Image<'static
     tauri::image::Image::new_owned(cropped, cw, ch)
 }
 
-fn build_tray_menu<R, M>(manager: &M) -> tauri::Result<Menu<R>>
+fn build_app_menu<R, M>(
+    manager: &M,
+    autostart_enabled: bool,
+) -> tauri::Result<(Menu<R>, CheckMenuItem<R>)>
 where
     R: Runtime,
     M: Manager<R>,
 {
     let text = NativeText::current();
-    MenuBuilder::new(manager)
+    let autostart = CheckMenuItem::with_id(
+        manager,
+        "autostart",
+        text.autostart(),
+        true,
+        autostart_enabled,
+        None::<&str>,
+    )?;
+    let menu = MenuBuilder::new(manager)
         .text("check_update", text.check_update())
         .text("project_site", text.project_site())
         .separator()
+        .item(&autostart)
+        .separator()
         .text("quit", text.quit())
-        .build()
+        .build()?;
+    Ok((menu, autostart))
 }
 
-fn build_balance_context_menu<R, M>(manager: &M) -> tauri::Result<Menu<R>>
-where
-    R: Runtime,
-    M: Manager<R>,
-{
-    let text = NativeText::current();
-    MenuBuilder::new(manager)
-        .text("check_update", text.check_update())
-        .text("project_site", text.project_site())
-        .separator()
-        .text("quit", text.quit())
-        .build()
+fn autostart_enabled(app: &AppHandle) -> bool {
+    read_config(app)
+        .map(|config| config.autostart_enabled)
+        .unwrap_or_else(|_| default_autostart())
+}
+
+/// 托盘菜单里的「开机自启动」勾选项，用于在不重建原生菜单的前提下同步勾选状态。
+struct TrayAutostartItem(CheckMenuItem<tauri::Wry>);
+
+fn set_autostart_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let mut config = match read_config(app) {
+        Ok(config) => config,
+        // 未完成配置时可能还没有 config.json，此时用默认配置承载自启动开关，
+        // 避免「接口调不通 → 无法保存 → 无法关闭开机自启动」。
+        Err(err) => {
+            if config_path(app)?.exists() {
+                return Err(err);
+            }
+            log::warn!("Config not found while storing autostart, creating default: {err}");
+            StoredConfig {
+                version: default_config_version(),
+                autostart_enabled: default_autostart(),
+                sites: Vec::new(),
+            }
+        }
+    };
+
+    config.autostart_enabled = enabled;
+    write_config(app, &config)?;
+    sync_autostart(app);
+    Ok(())
+}
+
+fn toggle_autostart(app: &AppHandle) {
+    let next = !autostart_enabled(app);
+    match set_autostart_enabled(app, next) {
+        Ok(()) => log::info!("Autostart set to {next}"),
+        Err(err) => log::warn!("Failed to set autostart to {next}: {err}"),
+    }
+
+    // 无论成功与否，勾选状态都以落盘后的真实配置为准。
+    if let Some(item) = app.try_state::<TrayAutostartItem>() {
+        let _ = item.0.set_checked(autostart_enabled(app));
+    }
 }
 
 fn show_main_window(app: &AppHandle) {

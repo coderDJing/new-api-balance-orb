@@ -32,7 +32,6 @@ type UiLocale = "zh" | "en";
 const UI_TEXT = {
   zh: {
     accessToken: "Access Token",
-    autostart: "开机自启动",
     balanceAriaLabel: "余额",
     copied: "已复制",
     copyErrorTitle: "点击复制",
@@ -51,7 +50,6 @@ const UI_TEXT = {
   },
   en: {
     accessToken: "Access Token",
-    autostart: "Launch at startup",
     balanceAriaLabel: "Balance",
     copied: "Copied",
     copyErrorTitle: "Click to copy",
@@ -88,7 +86,6 @@ type SiteConfig = {
 };
 
 type ClientConfig = {
-  autostartEnabled: boolean;
   sites: SiteConfig[];
 };
 
@@ -233,7 +230,6 @@ async function runPreviewCommand<T>(
 ): Promise<T> {
   if (command === "load_config") {
     return {
-      autostartEnabled: true,
       sites: [
         {
           id: "preview_1",
@@ -272,7 +268,6 @@ async function runPreviewCommand<T>(
 
   if (command === "save_config" || command === "save_site_config") {
     return {
-      autostartEnabled: true,
       sites: [
         {
           id: "preview_1",
@@ -290,7 +285,6 @@ async function runPreviewCommand<T>(
 
   if (command === "delete_site") {
     return {
-      autostartEnabled: true,
       sites: [],
     } as T;
   }
@@ -759,7 +753,6 @@ function SettingsWindow() {
   const [accessToken, setAccessToken] = useState("");
   const [userId, setUserId] = useState("");
   const [refreshIntervalSecs, setRefreshIntervalSecs] = useState("60");
-  const [autostartEnabled, setAutostartEnabled] = useState(true);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState("");
   const [setupHint, setSetupHint] = useState("");
@@ -813,7 +806,6 @@ function SettingsWindow() {
 
   const loadFormFromConfig = useCallback(async () => {
     const config = await runCommand<ClientConfig>("load_config");
-    setAutostartEnabled(config.autostartEnabled);
     const sorted = [...config.sites].sort((a, b) => a.sortOrder - b.sortOrder);
     if (sorted.length > 0) {
       loadSiteIntoForm(sorted[0]);
@@ -855,7 +847,6 @@ function SettingsWindow() {
     let unlisten: (() => void) | undefined;
     listen<string>("edit-site", async (event) => {
       const config = await runCommand<ClientConfig>("load_config");
-      setAutostartEnabled(config.autostartEnabled);
       const site = config.sites.find((s) => s.id === event.payload);
       if (site) {
         loadSiteIntoForm(site);
@@ -963,11 +954,6 @@ function SettingsWindow() {
             <input id="refresh-interval" type="number" data-window-no-drag value={refreshIntervalSecs}
               placeholder="60" min={10} max={3600}
               onChange={(e) => { setRefreshIntervalSecs(e.currentTarget.value); setSaveStatus("idle"); }} />
-          </label>
-          <label className="settings-field settings-field-toggle" htmlFor="autostart">
-            <span>{text.autostart}</span>
-            <input id="autostart" type="checkbox" data-window-no-drag checked={autostartEnabled}
-              onChange={(e) => { setAutostartEnabled(e.currentTarget.checked); setSaveStatus("idle"); }} />
           </label>
           <div className={`settings-error${error ? "" : " is-empty"}`} title={error} aria-live="polite">
             {error}
